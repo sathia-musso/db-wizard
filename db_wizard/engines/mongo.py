@@ -213,6 +213,15 @@ class MongoEngine(DatabaseEngine):
         Copy from source MongoEngine into this engine (target).
         Prefers mongodump|mongorestore pipe, falls back to Python copy.
         """
+        # MongoDB is schemaless: there is no "structure without data" to copy.
+        # Refuse rather than silently copying everything (which would be the
+        # exact opposite of what --schema-only asks for).
+        if kwargs.get('schema_only', False):
+            raise ValueError(
+                "MongoDB is schemaless - --schema-only is not supported. "
+                "There is no fixed schema to copy."
+            )
+
         if source_table:
             # Single collection copy
             return self._copy_collection(

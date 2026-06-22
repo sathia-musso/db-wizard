@@ -70,6 +70,12 @@ class CopyWizardFlow:
         create_backup = False
         if drop_target and is_mongo:
             create_backup = Confirm.ask("[cyan]💾 Create backup before dropping?[/cyan]", default=True)
+        # Schema-only is only meaningful on relational engines (MySQL/Postgres):
+        # schemaless stores (MongoDB/Redis) have no structure to copy on its own.
+        supports_schema_only = source_engine.scheme in ('mysql', 'postgres')
+        schema_only = False
+        if supports_schema_only:
+            schema_only = Confirm.ask("[cyan]🏗️  Copy schema only (no data)?[/cyan]", default=False)
         copy_indexes = True
         if is_mongo:
             copy_indexes = Confirm.ask("[cyan]Copy indexes?[/cyan]", default=True)
@@ -102,6 +108,8 @@ class CopyWizardFlow:
         summary.add_row("Drop Target", "YES" if drop_target else "NO")
         if drop_target and create_backup:
             summary.add_row("Create Backup", "YES 💾")
+        if supports_schema_only:
+            summary.add_row("Schema Only", "YES (no data)" if schema_only else "NO")
         summary.add_row("Copy Indexes", "YES" if copy_indexes else "NO")
         summary.add_row("Verify", "YES" if verify else "NO")
 
@@ -170,7 +178,7 @@ class CopyWizardFlow:
                         source_engine=source_engine,
                         source_db=source_db, source_table=coll_name,
                         target_db=target_db, target_table=coll_name,
-                        drop_target=drop_target
+                        drop_target=drop_target, schema_only=schema_only
                     )
                     results[coll_name] = result
 
@@ -190,7 +198,7 @@ class CopyWizardFlow:
                     source_engine=source_engine,
                     source_db=source_db, source_table=source_collection,
                     target_db=target_db, target_table=target_collection,
-                    drop_target=drop_target
+                    drop_target=drop_target, schema_only=schema_only
                 )
                 console.print(f"[green]✓ Copied {format_number(result['documents_copied'])} rows[/green]")
                 console.print(f"[green]✓ Created {result.get('indexes_created', 0)} indexes[/green]")
@@ -213,7 +221,7 @@ class CopyWizardFlow:
                     source_engine=source_engine,
                     source_db=source_db, source_table=None,
                     target_db=target_db, target_table=None,
-                    drop_target=drop_target
+                    drop_target=drop_target, schema_only=schema_only
                 )
                 if isinstance(results, dict) and all(isinstance(v, dict) for v in results.values()):
                     total_docs = sum(r['documents_copied'] for r in results.values())
@@ -245,7 +253,8 @@ class CopyWizardFlow:
                 'target_collection': target_collection,
                 'drop_target': drop_target,
                 'copy_indexes': copy_indexes,
-                'verify': verify
+                'verify': verify,
+                'schema_only': schema_only
             }
 
             if self.wizard.settings_manager.add_task(task_name, task_config):

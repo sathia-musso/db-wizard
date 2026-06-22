@@ -2,6 +2,20 @@
 
 All notable changes to mongo-wizard will be documented in this file.
 
+## [2.4.0] - 2026-06-22
+
+### Added
+- `--schema-only` flag for copy operations: copies structure/DDL only, no data.
+  - MySQL: `mysqldump --no-data` (CREATE TABLE statements + indexes, zero rows)
+  - PostgreSQL: `pg_dump --schema-only`
+  - Schemaless engines (MongoDB, Redis) are unsupported: the operation aborts
+    with a clear alert instead of silently copying all data.
+- Schema-only is selectable in the interactive wizard (MySQL/Postgres only) and
+  persisted as a task property (`schema_only`), so saved jobs can run schema-only
+  on their own.
+- `--schema-only` on `--task <name>` forces schema-only for that single run, even
+  if the saved task was created as a full copy.
+
 ## [1.0.0] - 2024-09-26
 
 ### Added

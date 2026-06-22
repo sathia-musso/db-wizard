@@ -212,6 +212,11 @@ class RedisEngine(DatabaseEngine):
         return False
 
     def copy(self, source_engine: 'DatabaseEngine', source_db: str, source_table: str | None, target_db: str, target_table: str | None, drop_target: bool = False, force: bool = False, **kwargs) -> dict[str, Any]:
+        # Redis is a schemaless key-value store: there is no schema to copy.
+        if kwargs.get('schema_only', False):
+            raise ValueError(
+                "Redis is schemaless (key-value) - --schema-only is not supported."
+            )
         console.print("[red]Redis cross-copy currently not implemented fully.[/red]")
         return {'documents_copied': 0, 'method': 'unsupported'}
 

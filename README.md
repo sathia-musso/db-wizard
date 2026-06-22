@@ -71,7 +71,13 @@ dbw --task daily_backup
 
 # Run automated (for cron)
 dbw --task daily_backup -y
+
+# Run a saved job copying structure only, no data (MySQL/Postgres)
+dbw --task daily_backup --schema-only
 ```
+
+Schema-only can be saved as part of a task (set in the interactive wizard for
+MySQL/Postgres), or forced for a single run with `--schema-only`.
 
 ### Direct Command Line
 
@@ -84,6 +90,11 @@ dbw -s mongodb://source-server -t mongodb://target-server \
 dbw -s mysql://user:pass@remote:3306/production \
     -t mysql://root@localhost/production \
     --source-db production --drop-target -y
+
+# Schema only (structure/DDL, no data) - MySQL/Postgres
+dbw -s mysql://user:pass@remote:3306/shop \
+    -t mysql://root@localhost/shop \
+    --source-db shop --schema-only -y
 ```
 
 ### Backup & Restore
@@ -116,6 +127,7 @@ dbw --restore /backups/2025_01_15-production.tar.gz --restore-to mongodb://local
 | `--target-db` | Target database name (defaults to source-db) |
 | `--source-collection` | Specific collection/table (omit for all) |
 | `--drop-target` | Drop target before copying |
+| `--schema-only` | Copy only structure/DDL, no data (MySQL/Postgres only; aborts on MongoDB/Redis) |
 | `-y, --yes` | Full automation without prompts |
 | `--verify` | Verify integrity after copy (MongoDB) |
 | `--force-python` | Force Python copy instead of mongodump (MongoDB) |

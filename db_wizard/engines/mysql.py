@@ -327,17 +327,21 @@ class MySQLEngine(DatabaseEngine):
         source_params = source_engine.params
         target_params = self.params
 
+        # schema_only: dump table structure (and indexes) without any rows.
+        # Implemented via mysqldump --no-data.
+        schema_only = kwargs.get('schema_only', False)
+
         if source_table:
             return self._copy_table(
                 source_params, source_db, source_table,
                 target_params, target_db, target_table or source_table,
-                drop_target=drop_target
+                drop_target=drop_target, schema_only=schema_only
             )
         else:
             return self._copy_database(
                 source_params, source_db,
                 target_params, target_db,
-                drop_target=drop_target
+                drop_target=drop_target, schema_only=schema_only
             )
 
     # -- UI terminology --
@@ -380,7 +384,7 @@ class MySQLEngine(DatabaseEngine):
         self,
         source_params: dict, source_db: str, source_table: str,
         target_params: dict, target_db: str, target_table: str,
-        drop_target: bool = False
+        drop_target: bool = False, schema_only: bool = False
     ) -> dict[str, Any]:
         """Copy a single table via mysqldump | mysql pipe."""
 
@@ -396,15 +400,20 @@ class MySQLEngine(DatabaseEngine):
         except (ValueError, subprocess.SubprocessError):
             pass
 
-        console.print(f"[green]📊 Table has ~{format_number(source_count)} rows[/green]")
-        console.print("[cyan]🚀 Using mysqldump | mysql pipe...[/cyan]")
+        if schema_only:
+            console.print("[cyan]🏗️  Schema-only copy (no data) via mysqldump --no-data...[/cyan]")
+        else:
+            console.print(f"[green]📊 Table has ~{format_number(source_count)} rows[/green]")
+            console.print("[cyan]🚀 Using mysqldump | mysql pipe...[/cyan]")
 
-        # Build dump command
+        # Build dump command. --no-data dumps CREATE TABLE statements only.
         dump_cmd = ['mysqldump'] + _build_mysql_args(source_params) + [
             '--single-transaction',
             '--skip-lock-tables',
-            source_db, source_table,
         ]
+        if schema_only:
+            dump_cmd.append('--no-data')
+        dump_cmd += [source_db, source_table]
 
         # Build restore command
         # Ensure target database exists
@@ -458,6 +467,14 @@ class MySQLEngine(DatabaseEngine):
         except (ValueError, subprocess.SubprocessError):
             copied = source_count  # Best estimate
 
+        if schema_only:
+            console.print(f"[green]✅ Schema copied for table {target_db}.{target_table} (no data)[/green]")
+            return {
+                'documents_copied': 0,
+                'source_count': source_count,
+                'method': 'mysqldump_schema',
+            }
+
         console.print(f"[green]✅ Copied {format_number(copied)} rows using mysqldump[/green]")
 
         return {
@@ -470,11 +487,14 @@ class MySQLEngine(DatabaseEngine):
         self,
         source_params: dict, source_db: str,
         target_params: dict, target_db: str,
-        drop_target: bool = False
+        drop_target: bool = False, schema_only: bool = False
     ) -> dict[str, Any]:
         """Copy entire database via mysqldump | mysql pipe."""
 
-        console.print(f"[cyan]📦 Copying entire database {source_db} -> {target_db}...[/cyan]")
+        if schema_only:
+            console.print(f"[cyan]🏗️  Copying schema only (no data) {source_db} -> {target_db}...[/cyan]")
+        else:
+            console.print(f"[cyan]📦 Copying entire database {source_db} -> {target_db}...[/cyan]")
 
         # Ensure target database exists (or recreate if drop)
         if drop_target:
@@ -487,12 +507,14 @@ class MySQLEngine(DatabaseEngine):
             ]
         subprocess.run(cmd, env=_get_mysql_env(target_params), capture_output=True, text=True)
 
-        # Build pipe
+        # Build pipe. --no-data dumps CREATE TABLE statements only (schema, no rows).
         dump_cmd = ['mysqldump'] + _build_mysql_args(source_params) + [
             '--single-transaction',
             '--skip-lock-tables',
-            source_db,
         ]
+        if schema_only:
+            dump_cmd.append('--no-data')
+        dump_cmd.append(source_db)
         restore_cmd = ['mysql'] + _build_mysql_args(target_params) + [target_db]
 
         with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as progress:
@@ -534,6 +556,13 @@ class MySQLEngine(DatabaseEngine):
                 total_rows = int(result.stdout.strip())
         except (ValueError, subprocess.SubprocessError):
             pass
+
+        if schema_only:
+            console.print(f"[green]✅ Schema copied for database {target_db} (no data)[/green]")
+            return {
+                'documents_copied': 0,
+                'method': 'mysqldump_schema',
+            }
 
         console.print(f"[green]✅ Database copied: ~{format_number(total_rows)} total rows[/green]")
 

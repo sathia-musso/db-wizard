@@ -12,10 +12,14 @@ from .utils import mask_password
 console = Console()
 
 
-def run_task(task_config: dict[str, Any], assume_yes: bool = False, force_python: bool = False) -> bool:
+def run_task(task_config: dict[str, Any], assume_yes: bool = False, force_python: bool = False,
+             schema_only: bool = False) -> bool:
     """
     Execute a task based on its type.
     Auto-detects engine from URIs in the task config.
+
+    schema_only: run a copy task copying only structure/DDL, no data.
+                 Ignored for backup/restore tasks (no schema concept there).
     """
     task_type = task_config.get('type', 'copy')
 
@@ -25,15 +29,30 @@ def run_task(task_config: dict[str, Any], assume_yes: bool = False, force_python
         elif task_type == 'restore':
             return run_restore_task(task_config)
         else:
-            return run_copy_task(task_config, assume_yes, force_python)
+            return run_copy_task(task_config, assume_yes, force_python, schema_only)
     except Exception as e:
         console.print(f"[red]❌ Task error: {e}[/red]")
         return False
 
 
-def run_copy_task(task_config: dict[str, Any], assume_yes: bool = False, force_python: bool = False) -> bool:
+def run_copy_task(task_config: dict[str, Any], assume_yes: bool = False, force_python: bool = False,
+                  schema_only: bool = False) -> bool:
     """Execute a copy task using the appropriate engine."""
     from .utils import resolve_host
+
+    # schema_only can come from the saved task itself or be forced via the CLI
+    # flag for this single run. Either one enables it.
+    schema_only = schema_only or task_config.get('schema_only', False)
+
+    # Schema-only is meaningless on schemaless engines: refuse up-front before
+    # opening tunnels/connections, instead of copying everything by surprise.
+    if schema_only:
+        scheme = EngineFactory.detect_scheme(task_config['source_uri'])
+        if scheme in ('mongodb', 'redis'):
+            engine_name = 'MongoDB' if scheme == 'mongodb' else 'Redis'
+            console.print(f"[yellow]⚠ {engine_name} is schemaless — --schema-only is not supported.[/yellow]")
+            return False
+        console.print("[cyan]🏗️  Schema-only: structure/DDL, no data[/cyan]")
 
     source_info = resolve_host(task_config['source_uri'], task_config.get('source_ssh_tunnel'))
     target_info = resolve_host(task_config['target_uri'], task_config.get('target_ssh_tunnel'))
@@ -77,6 +96,7 @@ def run_copy_task(task_config: dict[str, Any], assume_yes: bool = False, force_p
                     drop_target=task_config.get('drop_target', False),
                     force=assume_yes,
                     force_python=task_config.get('force_python', force_python),
+                    schema_only=schema_only,
                 )
                 total_docs += result.get('documents_copied', 0)
             console.print(f"[green]✅ Copied {len(source_table)} {target_engine.table_term_plural}, {format_number(total_docs)} rows[/green]")
@@ -91,6 +111,7 @@ def run_copy_task(task_config: dict[str, Any], assume_yes: bool = False, force_p
                 drop_target=task_config.get('drop_target', False),
                 force=assume_yes,
                 force_python=task_config.get('force_python', force_python),
+                schema_only=schema_only,
             )
             method = result.get('method', 'unknown')
             console.print(f"[green]✅ Copied {format_number(result['documents_copied'])} rows (method: {method})[/green]")
@@ -104,6 +125,7 @@ def run_copy_task(task_config: dict[str, Any], assume_yes: bool = False, force_p
                 drop_target=task_config.get('drop_target', False),
                 force=assume_yes,
                 force_python=task_config.get('force_python', force_python),
+                schema_only=schema_only,
             )
             # Results can be a dict of dicts (one per table) or a single dict
             if isinstance(results, dict) and all(isinstance(v, dict) for v in results.values()):
@@ -241,3 +263,5 @@ def display_task_summary(task_config: dict[str, Any]) -> None:
                 f"{task_config.get('target_collection', task_config['source_collection'])}"
             )
         console.print(f"[bold]Drop Target:[/bold] {'Yes' if task_config.get('drop_target') else 'No'}")
+        if task_config.get('schema_only'):
+            console.print(f"[bold]Schema Only:[/bold] Yes (no data)")

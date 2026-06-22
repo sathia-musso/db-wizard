@@ -272,7 +272,13 @@ class PostgresEngine(DatabaseEngine):
         ]
         subprocess.run(create_cmd, env=_build_pg_env(target_params), capture_output=True)
 
+        # schema_only: dump DDL only (CREATE TABLE/INDEX...) without table data,
+        # via pg_dump --schema-only.
+        schema_only = kwargs.get('schema_only', False)
+
         dump_cmd = ['pg_dump'] + _build_pg_args(source_params, include_db=False) + ['-d', source_db, '-Fc']
+        if schema_only:
+            dump_cmd.append('--schema-only')
         if source_table:
             dump_cmd.extend(['-t', source_table])
 
@@ -280,7 +286,10 @@ class PostgresEngine(DatabaseEngine):
         if drop_target:
             restore_cmd.append('--clean')
 
-        console.print(f"[cyan]📦 Copying PostgreSQL {source_db} -> {target_db}...[/cyan]")
+        if schema_only:
+            console.print(f"[cyan]🏗️  Copying PostgreSQL schema only (no data) {source_db} -> {target_db}...[/cyan]")
+        else:
+            console.print(f"[cyan]📦 Copying PostgreSQL {source_db} -> {target_db}...[/cyan]")
         
         try:
             dump_env = _build_pg_env(source_params)

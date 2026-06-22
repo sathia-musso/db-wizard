@@ -43,6 +43,7 @@ console = Console()
 @click.option('--target-db', help='Target database name (defaults to source-db)')
 @click.option('--source-collection', help='Source collection/table (omit for all)')
 @click.option('--drop-target', is_flag=True, help='Drop target before copying')
+@click.option('--schema-only', is_flag=True, help='Copy only structure/DDL, no data (MySQL/Postgres only; schemaless engines are unsupported)')
 @click.option('--dry-run', is_flag=True, help='Show what would be done without executing')
 @click.option('--verify', is_flag=True, help='Verify copy after completion')
 @click.option('--list-tasks', is_flag=True, help='List saved tasks')
@@ -58,7 +59,7 @@ console = Console()
 @click.option('--restore-to', help='Restore target MongoDB URI')
 @click.option('-c', '--count', is_flag=True, help='Count documents when listing tasks/hosts (slow on remote DBs)')
 def main(source, target, source_db, target_db, source_collection, drop_target,
-         dry_run, verify, list_tasks, list_hosts, task, force, assume_yes, force_python, verify_connection,
+         schema_only, dry_run, verify, list_tasks, list_hosts, task, force, assume_yes, force_python, verify_connection,
          backup, backup_to, restore, restore_to, count):
     """
     db-wizard - Advanced database copy and migration tool
@@ -205,8 +206,9 @@ def main(source, target, source_db, target_db, source_collection, drop_target,
                 console.print("[red]Cancelled[/red]")
                 sys.exit(0)
 
-        # Execute task using centralized runner
-        success = run_task(task_config, assume_yes, force_python)
+        # Execute task using centralized runner.
+        # schema_only: run the saved job but copy structure only, no data.
+        success = run_task(task_config, assume_yes, force_python, schema_only)
 
         if success:
             console.print("[green]✅ Task completed successfully![/green]")
@@ -295,10 +297,21 @@ def main(source, target, source_db, target_db, source_collection, drop_target,
 
         target_db = target_db or source_db
 
+        # Schema-only is meaningless on schemaless engines. Refuse up-front with
+        # a clear alert instead of connecting and silently copying everything.
+        if schema_only:
+            scheme = EngineFactory.detect_scheme(source)
+            if scheme in ('mongodb', 'redis'):
+                engine_name = 'MongoDB' if scheme == 'mongodb' else 'Redis'
+                console.print(f"[yellow]⚠ {engine_name} is schemaless — --schema-only is not supported.[/yellow]")
+                sys.exit(1)
+
         console.print(f"[cyan]📋 Direct copy mode[/cyan]")
         console.print(f"Source: {source}/{source_db}/{source_collection or 'ALL'}")
         console.print(f"Target: {target}/{target_db}/{source_collection or 'ALL'}")
 
+        if schema_only:
+            console.print("[cyan]🏗️  Schema-only: structure/DDL, no data[/cyan]")
         if drop_target:
             console.print("[yellow]⚠ Will drop target before copying[/yellow]")
 
@@ -327,6 +340,7 @@ def main(source, target, source_db, target_db, source_collection, drop_target,
                 drop_target=drop_target,
                 force=assume_yes,
                 force_python=force_python,
+                schema_only=schema_only,
             )
 
             # Handle both single-result and multi-result returns
