@@ -3,7 +3,7 @@ from rich.console import Console
 from rich.prompt import Prompt
 
 from ..backup import BackupManager, BackupTask
-from ..utils import mask_password as _mask_password
+from ..utils import resolve_host
 from ..formatting import format_number
 from ._common import _test_connection
 
@@ -114,7 +114,9 @@ class RestoreWizardFlow:
         # 6. Confirm and restore
         console.print(f"\n[bold]Restore Configuration:[/bold]")
         console.print(f"  Backup: {backup_filename}")
-        console.print(f"  Target: {_mask_password(target_uri)}")
+        console.print(
+            f"  Target: {resolve_host(target_host['raw_uri'], target_host.get('ssh_tunnel')).connection_label(target_database)}"
+        )
         console.print(f"  Database: {target_database}")
         console.print(f"  Drop target: {'Yes' if drop_target else 'No'}")
 

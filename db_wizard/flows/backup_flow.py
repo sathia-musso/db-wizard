@@ -4,7 +4,7 @@ from urllib.parse import urlparse
 
 from ..engine import EngineFactory
 from ..backup import BackupManager, BackupTask
-from ..utils import mask_password as _mask_password
+from ..utils import resolve_host
 from ..formatting import format_number
 
 console = Console()
@@ -114,7 +114,9 @@ class BackupWizardFlow:
 
         # 6. Show configuration and confirm
         console.print(f"\n[bold]Backup Configuration:[/bold]")
-        console.print(f"  Source: {_mask_password(source_uri)}")
+        console.print(
+            f"  Source: {resolve_host(source_host['raw_uri'], source_host.get('ssh_tunnel')).connection_label(database)}"
+        )
         console.print(f"  Database: {database}")
         console.print(f"  Collections: {collections if collections else 'ALL'}")
         if isinstance(storage_url, dict):

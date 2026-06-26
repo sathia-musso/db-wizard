@@ -30,10 +30,19 @@ console = Console()
 
 class HostInfo:
     """Resolved info about a database host URI."""
-    def __init__(self, uri: str, name: str, has_tunnel: bool, tunnel_config: str | dict | None):
+    def __init__(
+        self,
+        uri: str,
+        name: str,
+        has_tunnel: bool,
+        tunnel_config: str | dict | None,
+        saved_name: str | None = None,
+    ):
         self.uri = uri
         # Friendly display name (saved host name or hostname from URI)
         self.name = name
+        # Saved host name from settings, if the URI matched a configured host
+        self.saved_name = saved_name
         # Whether this host requires an SSH tunnel
         self.has_tunnel = has_tunnel
         # SSH tunnel config (string hostname or dict with host/user/port/key_path)
@@ -50,6 +59,18 @@ class HostInfo:
 
     def masked_uri(self) -> str:
         return mask_password(self.uri)
+
+    def connection_label(self, database: str | None = None) -> str:
+        """Masked URI for confirmation prompts, with host:db prefix and SSH badge when applicable."""
+        parts = []
+        if self.saved_name:
+            tag = f"{self.saved_name}:{database}" if database else self.saved_name
+            parts.append(f"[cyan]{tag}[/cyan]")
+        parts.append(self.masked_uri())
+        label = " ".join(parts)
+        if self.has_tunnel:
+            label += f" [yellow][OVER SSH {self.tunnel_label}][/yellow]"
+        return label
 
 
 def resolve_host(uri: str | None, tunnel_override: str | dict | None = None) -> HostInfo:
@@ -102,6 +123,7 @@ def resolve_host(uri: str | None, tunnel_override: str | dict | None = None) -> 
         name=resolved_name or fallback_name,
         has_tunnel=has_tunnel,
         tunnel_config=tunnel_config,
+        saved_name=resolved_name,
     )
 
 
@@ -333,7 +355,7 @@ def format_task_table_row(
     def _format_host_part(info, db, color, count_str):
         host_db = f"[{color}]{info.name}[/{color}]:[blue]{db}[/blue]"
         if info.has_tunnel:
-            return f"[red][[/red][red]SSH TUNNEL[/red] {host_db}[red]][/red] {count_str}".strip()
+            host_db += f" [yellow][OVER SSH {info.tunnel_label}][/yellow]"
         return f"{host_db} {count_str}".strip()
 
     source_part = _format_host_part(source_info, source_db, source_host_color, source_count)

@@ -6,6 +6,7 @@ import pytest
 from db_wizard.utils import (
     parse_collection_selection,
     format_document_count,
+    HostInfo,
 )
 from db_wizard.engines.mongo import MongoEngine
 
@@ -108,3 +109,67 @@ class TestUtils:
             auth_db="authdb"
         )
         assert uri == "mongodb://user:pass@prod.server.com:27020/authdb"
+
+
+class TestHostInfo:
+    """Test host resolution display labels"""
+
+    def test_connection_label_without_tunnel(self):
+        info = HostInfo("mysql://user:pass@localhost:3306/db", "local", False, None)
+        assert info.connection_label() == "mysql://user:****@localhost:3306/db"
+
+    def test_connection_label_with_tunnel_string(self):
+        info = HostInfo(
+            "mysql://user:pass@localhost:3306/db", "claim", True, "claim", saved_name="claim",
+        )
+        assert "[OVER SSH claim]" in info.connection_label()
+        assert "mysql://user:****@localhost:3306/db" in info.connection_label()
+
+    def test_connection_label_with_saved_host_and_database(self):
+        info = HostInfo(
+            "mysql://user:pass@localhost:3306/performerclaim",
+            "claim", True, "claim", saved_name="claim",
+        )
+        label = info.connection_label("performerclaim")
+        assert "claim:performerclaim" in label
+        assert "[OVER SSH claim]" in label
+        assert "mysql://user:****@localhost:3306/performerclaim" in label
+
+    def test_connection_label_without_saved_host_skips_prefix(self):
+        info = HostInfo("mysql://user:pass@localhost:3306/db", "localhost", False, None)
+        label = info.connection_label("mydb")
+        assert "localhost:mydb" not in label
+        assert label == "mysql://user:****@localhost:3306/db"
+
+    def test_connection_label_with_tunnel_dict(self):
+        info = HostInfo(
+            "mysql://user:pass@localhost:3306/db", "remote", True,
+            {"host": "prod.example.com", "user": "deploy"},
+        )
+        assert "[OVER SSH prod.example.com]" in info.connection_label()
+
+    def test_display_task_summary_shows_ssh_badge(self):
+        from db_wizard.task_runner import display_task_summary
+        from io import StringIO
+        from rich.console import Console
+        import db_wizard.task_runner as tr
+
+        task_config = {
+            "source_uri": "mysql://user:pass@localhost:3306/src",
+            "target_uri": "mysql://root@localhost:3306/tgt",
+            "source_db": "src",
+            "target_db": "tgt",
+            "source_ssh_tunnel": "claim",
+        }
+        buf = StringIO()
+        tr.console = Console(file=buf, width=120, force_terminal=True, color_system=None)
+        try:
+            display_task_summary(task_config)
+            output = buf.getvalue()
+        finally:
+            from rich.console import Console as RichConsole
+            tr.console = RichConsole()
+
+        assert "[OVER SSH claim]" in output
+        assert "localhost:3306/src" in output
+        assert "localhost:3306/tgt" in output

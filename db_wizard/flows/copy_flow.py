@@ -5,7 +5,7 @@ from rich.table import Table
 from rich.prompt import Prompt, Confirm
 from ..engine import EngineFactory
 from ..formatting import format_number
-from ..utils import mask_password as _mask_password
+from ..utils import resolve_host
 
 console = Console()
 
@@ -91,14 +91,20 @@ class CopyWizardFlow:
         summary.add_column("Property", style="cyan")
         summary.add_column("Value", style="yellow")
 
-        summary.add_row("Source", f"{_mask_password(source_host['raw_uri'])}")
+        summary.add_row(
+            "Source",
+            resolve_host(source_host['raw_uri'], source_host.get('ssh_tunnel')).connection_label(source_db),
+        )
         summary.add_row("Source DB", source_db)
         if isinstance(source_collection, list):
             summary.add_row("Source Collections", f"{len(source_collection)} selected")
         else:
             summary.add_row("Source Collection", source_collection or "ALL")
         summary.add_row("", "")
-        summary.add_row("Target", f"{_mask_password(target_host['raw_uri'])}")
+        summary.add_row(
+            "Target",
+            resolve_host(target_host['raw_uri'], target_host.get('ssh_tunnel')).connection_label(target_db),
+        )
         summary.add_row("Target DB", target_db)
         if isinstance(source_collection, list):
             summary.add_row("Target Collections", "Same names as source")

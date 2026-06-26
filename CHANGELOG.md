@@ -2,6 +2,12 @@
 
 All notable changes to mongo-wizard will be documented in this file.
 
+## [2.4.1] - 2026-06-26
+
+### Added
+- Task confirmation summaries now show `[OVER SSH host]` when a connection uses an SSH tunnel, making it clear which side is remote even when both URIs point to `localhost`.
+- Saved host names are shown as `host:database` prefix (e.g. `claim:performerclaim`) alongside the masked URI in copy, backup, and restore confirmations.
+
 ## [2.4.0] - 2026-06-22
 
 ### Added

@@ -7,7 +7,7 @@ from typing import Any
 from rich.console import Console
 from .engine import EngineFactory
 from .formatting import format_number
-from .utils import mask_password
+from .utils import resolve_host
 
 console = Console()
 
@@ -226,16 +226,25 @@ def display_task_summary(task_config: dict[str, Any]) -> None:
     task_type = task_config.get('type', 'copy')
 
     if task_type == 'backup':
+        from .utils import resolve_host
+
+        host_info = resolve_host(_get_uri(task_config), task_config.get('ssh_tunnel'))
         console.print(f"[bold]Type:[/bold] BACKUP")
-        console.print(f"[bold]Source:[/bold] {mask_password(_get_uri(task_config))}")
+        console.print(f"[bold]Source:[/bold] {host_info.connection_label(task_config['database'])}")
         console.print(f"[bold]Database:[/bold] {task_config['database']}")
         console.print(f"[bold]Collections:[/bold] {task_config.get('collections', 'ALL')}")
         console.print(f"[bold]Destination:[/bold] {task_config['storage_url']}")
 
     elif task_type == 'restore':
+        from .utils import resolve_host
+
+        host_info = resolve_host(_get_uri(task_config), task_config.get('ssh_tunnel'))
         console.print(f"[bold]Type:[/bold] RESTORE")
         console.print(f"[bold]Backup:[/bold] {task_config['backup_file']}")
-        console.print(f"[bold]Target:[/bold] {mask_password(_get_uri(task_config))}")
+        console.print(
+            f"[bold]Target:[/bold] "
+            f"{host_info.connection_label(task_config.get('target_database'))}"
+        )
         console.print(f"[bold]Database:[/bold] {task_config.get('target_database', 'from backup')}")
         console.print(f"[bold]Drop Target:[/bold] {'Yes' if task_config.get('drop_target') else 'No'}")
         console.print(f"[bold]Storage:[/bold] {task_config['storage_url']}")
@@ -247,15 +256,12 @@ def display_task_summary(task_config: dict[str, Any]) -> None:
         source_info = resolve_host(task_config.get('source_uri'), task_config.get('source_ssh_tunnel'))
         target_info = resolve_host(task_config.get('target_uri'), task_config.get('target_ssh_tunnel'))
 
-        src_label = source_info.masked_uri()
-        tgt_label = target_info.masked_uri()
-        if source_info.has_tunnel:
-            src_label += f" (via [red]SSH TUNNEL[/red]: {source_info.tunnel_label})"
-        if target_info.has_tunnel:
-            tgt_label += f" (via [red]SSH TUNNEL[/red]: {target_info.tunnel_label})"
-
-        console.print(f"[bold]Source:[/bold] {src_label}")
-        console.print(f"[bold]Target:[/bold] {tgt_label}")
+        console.print(
+            f"[bold]Source:[/bold] {source_info.connection_label(task_config.get('source_db'))}"
+        )
+        console.print(
+            f"[bold]Target:[/bold] {target_info.connection_label(task_config.get('target_db'))}"
+        )
         console.print(f"[bold]Database:[/bold] {task_config.get('source_db', '?')} → {task_config.get('target_db', '?')}")
         if task_config.get('source_collection'):
             console.print(
