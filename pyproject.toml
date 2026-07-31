@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "db-wizard"
-version = "2.4.1"
+version = "2.5.0"
 description = "Advanced database copy and migration tool - supports MongoDB, MySQL, PostgreSQL, Redis"
 readme = "README.md"
 requires-python = ">=3.11"

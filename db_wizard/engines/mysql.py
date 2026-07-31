@@ -18,6 +18,7 @@ from ..formatting import format_number
 from ..constants import (
     DEFAULT_CONNECTION_TIMEOUT,
     DEFAULT_MYSQL_PORT,
+    INCREMENTAL_OVERLAP_ROWS,
     MYSQL_SYSTEM_DATABASES,
     PIPE_TIMEOUT,
 )
@@ -64,6 +65,110 @@ def _get_mysql_env(params: dict[str, Any]) -> dict[str, str]:
     if params.get('password'):
         env['MYSQL_PWD'] = params['password']
     return env
+
+
+def _escape_literal(value: str) -> str:
+    """Escape a string so it can be embedded in a single-quoted SQL literal."""
+    return value.replace("\\", "\\\\").replace("'", "''")
+
+
+def _mysql_scalar(params: dict[str, Any], sql: str) -> str | None:
+    """
+    Run a query expected to return one value and give it back as a string.
+
+    Returns None when the query fails (e.g. the table does not exist), when it
+    returns no rows, or when the value is SQL NULL (empty table). Callers treat
+    all three the same way: there is nothing to resume from.
+    """
+    cmd = ['mysql'] + _build_mysql_args(params) + ['-N', '-B', '-e', sql]
+    try:
+        result = subprocess.run(cmd, env=_get_mysql_env(params), capture_output=True, text=True)
+    except subprocess.SubprocessError:
+        return None
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    if not value or value == 'NULL':
+        return None
+    return value
+
+
+def _detect_auto_increment_column(params: dict[str, Any], database: str, table: str) -> str | None:
+    """Find the AUTO_INCREMENT column of a table, if it has one."""
+    sql = (
+        f"SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+        f"WHERE TABLE_SCHEMA = '{_escape_literal(database)}' "
+        f"AND TABLE_NAME = '{_escape_literal(table)}' "
+        f"AND EXTRA LIKE '%auto_increment%' LIMIT 1"
+    )
+    return _mysql_scalar(params, sql)
+
+
+def _list_table_names(params: dict[str, Any], database: str) -> list[str]:
+    """List base table names of a database (no views)."""
+    cmd = ['mysql'] + _build_mysql_args(params) + [
+        '-N', '-B', '-e',
+        f"SELECT TABLE_NAME FROM information_schema.TABLES "
+        f"WHERE TABLE_SCHEMA = '{_escape_literal(database)}' "
+        f"AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME"
+    ]
+    result = subprocess.run(cmd, env=_get_mysql_env(params), capture_output=True, text=True)
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+
+
+def _run_dump_pipe(
+    dump_cmd: list[str], source_params: dict[str, Any],
+    restore_cmd: list[str], target_params: dict[str, Any]
+) -> tuple[bool, str]:
+    """
+    Run `dump_cmd | restore_cmd` and report (success, error_message).
+    Both processes are killed if the pipe outlives PIPE_TIMEOUT.
+    """
+    try:
+        dump_process = subprocess.Popen(
+            dump_cmd, env=_get_mysql_env(source_params),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        restore_process = subprocess.Popen(
+            restore_cmd, env=_get_mysql_env(target_params),
+            stdin=dump_process.stdout, stderr=subprocess.PIPE
+        )
+        dump_process.stdout.close()
+
+        try:
+            _, restore_stderr = restore_process.communicate(timeout=PIPE_TIMEOUT)
+            dump_stderr = dump_process.stderr.read()
+        except subprocess.TimeoutExpired:
+            restore_process.kill()
+            dump_process.kill()
+            return False, f"timed out after {PIPE_TIMEOUT // 60} minutes"
+
+        if restore_process.returncode != 0:
+            return False, (restore_stderr or dump_stderr or b'').decode('utf-8', errors='replace').strip()
+
+        return True, ""
+
+    except Exception as e:
+        return False, str(e)
+
+
+def _build_incremental_where(column: str, watermark: str) -> str:
+    """
+    Build the WHERE clause that selects only the rows the target is missing.
+
+    Numeric watermarks step back INCREMENTAL_OVERLAP_ROWS rows, because an
+    AUTO_INCREMENT id lower than MAX(id) can still be committed after it.
+    Non-numeric watermarks (timestamps, mostly) use >= so rows sharing the
+    boundary value are not lost. Either way the re-copied rows collide on the
+    primary key and INSERT IGNORE drops them.
+    """
+    col = f"`{column}`"
+    try:
+        return f"{col} > {int(watermark) - INCREMENTAL_OVERLAP_ROWS}"
+    except ValueError:
+        return f"{col} >= '{_escape_literal(watermark)}'"
 
 
 class MySQLEngine(DatabaseEngine):
@@ -202,6 +307,18 @@ class MySQLEngine(DatabaseEngine):
                 return 0
         return 0
 
+    # -- Incremental copy support --
+
+    supports_incremental = True
+
+    def detect_watermark_column(self, database: str, table: str) -> str | None:
+        """The AUTO_INCREMENT column, which is the only one MySQL guarantees to grow."""
+        return _detect_auto_increment_column(self.params, database, table)
+
+    def max_watermark(self, database: str, table: str, column: str) -> str | None:
+        """Highest value of `column`, as a string. None if table missing or empty."""
+        return _mysql_scalar(self.params, f"SELECT MAX(`{column}`) FROM `{database}`.`{table}`")
+
     def sample_rows(self, database: str, table: str, limit: int = 5) -> tuple[list[str], list[list[str]]]:
         """Fetch sample rows via mysql CLI."""
         cmd = ['mysql'] + _build_mysql_args(self.params) + [
@@ -331,13 +448,42 @@ class MySQLEngine(DatabaseEngine):
         # Implemented via mysqldump --no-data.
         schema_only = kwargs.get('schema_only', False)
 
+        # incremental: copy only the rows sitting above the target's watermark.
+        incremental = kwargs.get('incremental', False)
+        since_column = kwargs.get('since_column')
+
+        # The two flags pull in opposite directions: schema-only copies no rows
+        # at all, incremental exists precisely to copy the missing ones.
+        if incremental and schema_only:
+            raise ValueError("--incremental and --schema-only are mutually exclusive.")
+
+        # Dropping the target destroys the very watermark we resume from, which
+        # would silently turn an incremental run into a full copy.
+        if incremental and drop_target:
+            raise ValueError(
+                "--incremental and --drop-target are mutually exclusive: "
+                "dropping the target erases the watermark to resume from."
+            )
+
         if source_table:
+            if incremental:
+                return self._copy_table_incremental(
+                    source_params, source_db, source_table,
+                    target_params, target_db, target_table or source_table,
+                    since_column=since_column
+                )
             return self._copy_table(
                 source_params, source_db, source_table,
                 target_params, target_db, target_table or source_table,
                 drop_target=drop_target, schema_only=schema_only
             )
         else:
+            if incremental:
+                return self._copy_database_incremental(
+                    source_params, source_db,
+                    target_params, target_db,
+                    since_column=since_column
+                )
             return self._copy_database(
                 source_params, source_db,
                 target_params, target_db,
@@ -482,6 +628,135 @@ class MySQLEngine(DatabaseEngine):
             'source_count': source_count,
             'method': 'mysqldump',
         }
+
+    # -- Incremental copy --
+
+    def _copy_table_incremental(
+        self,
+        source_params: dict, source_db: str, source_table: str,
+        target_params: dict, target_db: str, target_table: str,
+        since_column: str | None = None
+    ) -> dict[str, Any]:
+        """
+        Copy only the rows the target is missing, assuming an append-only table.
+
+        Reads MAX(watermark) from the TARGET, then dumps from the source
+        everything above it. Never sees UPDATEs or DELETEs - by design.
+        """
+        # The dump emits INSERT statements naming `source_table`, and with
+        # --no-create-info there is no CREATE TABLE to rewrite them against.
+        if source_table != target_table:
+            console.print(
+                f"[red]✗ Incremental copy cannot rename tables "
+                f"({source_table} -> {target_table}). Use identical names.[/red]"
+            )
+            return {'documents_copied': 0, 'method': 'incremental_rename_unsupported'}
+
+        # Which column do we resume on? Explicit override wins, otherwise the
+        # source's AUTO_INCREMENT column. Without one we refuse rather than
+        # quietly copying the whole table.
+        column = since_column or _detect_auto_increment_column(source_params, source_db, source_table)
+        if not column:
+            console.print(
+                f"[red]✗ {source_db}.{source_table}: no AUTO_INCREMENT column found. "
+                f"Pass --since-column to name the column to resume from.[/red]"
+            )
+            return {'documents_copied': 0, 'method': 'incremental_no_watermark'}
+
+        # Make sure the target database exists before asking it anything.
+        subprocess.run(
+            ['mysql'] + _build_mysql_args(target_params) + [
+                '-e', f"CREATE DATABASE IF NOT EXISTS `{target_db}`"
+            ],
+            env=_get_mysql_env(target_params), capture_output=True, text=True
+        )
+
+        watermark = _mysql_scalar(
+            target_params, f"SELECT MAX(`{column}`) FROM `{target_db}`.`{target_table}`"
+        )
+
+        # No watermark means the target table is missing or empty: there is
+        # nothing to resume from, so the incremental copy IS the full copy.
+        if watermark is None:
+            console.print(
+                f"[yellow]↻ {target_db}.{target_table} is empty or missing — full copy this time[/yellow]"
+            )
+            return self._copy_table(
+                source_params, source_db, source_table,
+                target_params, target_db, target_table,
+                drop_target=False, schema_only=False
+            )
+
+        where = _build_incremental_where(column, watermark)
+        console.print(f"[cyan]⏩ Incremental copy of {source_db}.{source_table} WHERE {where}[/cyan]")
+
+        rows_before = _mysql_scalar(target_params, f"SELECT COUNT(*) FROM `{target_db}`.`{target_table}`")
+
+        # --no-create-info: never touch the existing table definition.
+        # --insert-ignore: the overlap rows collide on the PK and get dropped,
+        #                  which is what makes re-running this safe.
+        dump_cmd = ['mysqldump'] + _build_mysql_args(source_params) + [
+            '--single-transaction',
+            '--skip-lock-tables',
+            '--no-create-info',
+            '--skip-add-locks',
+            '--insert-ignore',
+            f'--where={where}',
+            source_db, source_table,
+        ]
+        restore_cmd = ['mysql'] + _build_mysql_args(target_params) + [target_db]
+
+        ok, error = _run_dump_pipe(dump_cmd, source_params, restore_cmd, target_params)
+        if not ok:
+            console.print(f"[red]Incremental copy failed: {error}[/red]")
+            return {'documents_copied': 0, 'method': 'incremental_failed'}
+
+        rows_after = _mysql_scalar(target_params, f"SELECT COUNT(*) FROM `{target_db}`.`{target_table}`")
+
+        copied = 0
+        if rows_before is not None and rows_after is not None:
+            try:
+                copied = int(rows_after) - int(rows_before)
+            except ValueError:
+                copied = 0
+
+        console.print(f"[green]✅ Appended {format_number(copied)} new rows to {target_db}.{target_table}[/green]")
+
+        return {
+            'documents_copied': copied,
+            'watermark_column': column,
+            'watermark_value': watermark,
+            'method': 'mysqldump_incremental',
+        }
+
+    def _copy_database_incremental(
+        self,
+        source_params: dict, source_db: str,
+        target_params: dict, target_db: str,
+        since_column: str | None = None
+    ) -> dict[str, Any]:
+        """
+        Incremental copy of every table in a database.
+
+        Each table has its own watermark, so this is a loop of single-table
+        copies rather than one big pipe. Returns one result dict per table.
+        """
+        tables = _list_table_names(source_params, source_db)
+        if not tables:
+            console.print(f"[yellow]No tables found in {source_db}[/yellow]")
+            return {}
+
+        console.print(f"[cyan]⏩ Incremental copy of {len(tables)} tables: {source_db} -> {target_db}[/cyan]")
+
+        results = {}
+        for table in tables:
+            console.print(f"\n[bold]📁 {table}[/bold]")
+            results[table] = self._copy_table_incremental(
+                source_params, source_db, table,
+                target_params, target_db, table,
+                since_column=since_column
+            )
+        return results
 
     def _copy_database(
         self,

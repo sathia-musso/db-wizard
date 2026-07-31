@@ -258,7 +258,11 @@ def format_task_table_row(
 
         return task_name, display, str(coll_display)
 
-    # Copy task
+    # Copy task. Incremental tasks behave very differently from full ones, so
+    # the listing has to say which is which at a glance.
+    if task_config.get('incremental'):
+        task_name = f"{task_name} [cyan]⏩ incremental[/cyan]"
+
     source_uri = task_config.get('source_uri')
     target_uri = task_config.get('target_uri')
     source_db = task_config.get('source_db')
@@ -364,6 +368,18 @@ def format_task_table_row(
     source_target = f"{source_part} → {target_part}"
 
     return task_name, source_target, coll_display
+
+
+# Suffixes of the 'method' field that mean the copy did NOT happen.
+# Engines report refusals and failures there, and a refusal must never be
+# announced as a successful copy of zero rows.
+_FAILED_METHOD_SUFFIXES = ('failed', 'error', 'timeout', 'unsupported', 'no_watermark')
+
+
+def copy_failed(result: dict[str, Any]) -> bool:
+    """True when a copy result describes a refusal or a failure, not a copy."""
+    method = result.get('method', '')
+    return any(method.endswith(suffix) for suffix in _FAILED_METHOD_SUFFIXES)
 
 
 # Re-export for backward compatibility

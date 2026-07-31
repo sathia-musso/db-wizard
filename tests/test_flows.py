@@ -311,6 +311,7 @@ class TestCopyWizardFlow:
         engine.table_term = "collection"
         engine.table_term_plural = "collections"
         engine.count_rows.return_value = 1000
+        engine.supports_incremental = True
         engine.list_tables.return_value = [
             {'name': 'users', 'rows': 1000, 'indexes': 2}
         ]
@@ -343,6 +344,7 @@ class TestCopyWizardFlow:
                  True,   # "same db name?"
                  True,   # "same collection name?"
                  False,  # "drop target?"
+                 False,  # "incremental copy?"
                  True,   # "copy indexes?"
                  True,   # "verify?"
                  True,   # "proceed?"
@@ -399,6 +401,7 @@ class TestCopyWizardFlow:
                  False,  # "select multiple?"
                  True,   # "same db name?"
                  False,  # "drop target?"
+                 False,  # "incremental copy?"
                  True,   # "copy indexes?"
                  False,  # "verify?"
                  True,   # "proceed?"
@@ -440,6 +443,7 @@ class TestCopyWizardFlow:
                  True,   # "same db name?"
                  True,   # "same collection name?"
                  False,  # "drop target?"
+                 False,  # "incremental copy?"
                  True,   # "copy indexes?"
                  True,   # "verify?"
                  False,  # "proceed?" -> NO, user cancels

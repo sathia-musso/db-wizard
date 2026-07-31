@@ -44,6 +44,8 @@ console = Console()
 @click.option('--source-collection', help='Source collection/table (omit for all)')
 @click.option('--drop-target', is_flag=True, help='Drop target before copying')
 @click.option('--schema-only', is_flag=True, help='Copy only structure/DDL, no data (MySQL/Postgres only; schemaless engines are unsupported)')
+@click.option('--incremental', is_flag=True, help='Copy only rows above the target watermark, for append-only tables (MySQL/MongoDB). Does NOT detect updates or deletes')
+@click.option('--since-column', help='Watermark column for --incremental (default: AUTO_INCREMENT column / _id)')
 @click.option('--dry-run', is_flag=True, help='Show what would be done without executing')
 @click.option('--verify', is_flag=True, help='Verify copy after completion')
 @click.option('--list-tasks', is_flag=True, help='List saved tasks')
@@ -59,7 +61,8 @@ console = Console()
 @click.option('--restore-to', help='Restore target MongoDB URI')
 @click.option('-c', '--count', is_flag=True, help='Count documents when listing tasks/hosts (slow on remote DBs)')
 def main(source, target, source_db, target_db, source_collection, drop_target,
-         schema_only, dry_run, verify, list_tasks, list_hosts, task, force, assume_yes, force_python, verify_connection,
+         schema_only, incremental, since_column, dry_run, verify, list_tasks, list_hosts, task, force,
+         assume_yes, force_python, verify_connection,
          backup, backup_to, restore, restore_to, count):
     """
     db-wizard - Advanced database copy and migration tool
@@ -208,7 +211,12 @@ def main(source, target, source_db, target_db, source_collection, drop_target,
 
         # Execute task using centralized runner.
         # schema_only: run the saved job but copy structure only, no data.
-        success = run_task(task_config, assume_yes, force_python, schema_only)
+        # incremental: run the saved job copying only the rows above the
+        #              target's watermark (append-only tables).
+        success = run_task(
+            task_config, assume_yes, force_python, schema_only,
+            incremental=incremental, since_column=since_column
+        )
 
         if success:
             console.print("[green]✅ Task completed successfully![/green]")
@@ -306,12 +314,38 @@ def main(source, target, source_db, target_db, source_collection, drop_target,
                 console.print(f"[yellow]⚠ {engine_name} is schemaless — --schema-only is not supported.[/yellow]")
                 sys.exit(1)
 
+        # Incremental needs a per-row watermark: only engines that can filter
+        # rows by a monotonic column support it.
+        if incremental:
+            scheme = EngineFactory.detect_scheme(source)
+            if scheme not in ('mysql', 'mongodb'):
+                console.print(
+                    f"[yellow]⚠ --incremental is not supported for {scheme}. "
+                    f"Supported: mysql, mongodb.[/yellow]"
+                )
+                sys.exit(1)
+            if schema_only:
+                console.print("[yellow]⚠ --incremental and --schema-only are mutually exclusive.[/yellow]")
+                sys.exit(1)
+            if drop_target:
+                console.print(
+                    "[yellow]⚠ --incremental and --drop-target are mutually exclusive: "
+                    "dropping the target erases the watermark to resume from.[/yellow]"
+                )
+                sys.exit(1)
+
         console.print(f"[cyan]📋 Direct copy mode[/cyan]")
         console.print(f"Source: {source}/{source_db}/{source_collection or 'ALL'}")
         console.print(f"Target: {target}/{target_db}/{source_collection or 'ALL'}")
 
         if schema_only:
             console.print("[cyan]🏗️  Schema-only: structure/DDL, no data[/cyan]")
+        if incremental:
+            console.print(
+                f"[cyan]⏩ Incremental: only rows above the target watermark"
+                f"{f' on {since_column}' if since_column else ''}[/cyan]"
+            )
+            console.print("[dim]Updates and deletes on already-copied rows are NOT detected[/dim]")
         if drop_target:
             console.print("[yellow]⚠ Will drop target before copying[/yellow]")
 
@@ -341,15 +375,29 @@ def main(source, target, source_db, target_db, source_collection, drop_target,
                 force=assume_yes,
                 force_python=force_python,
                 schema_only=schema_only,
+                incremental=incremental,
+                since_column=since_column,
             )
 
             # Handle both single-result and multi-result returns
             if isinstance(result, dict) and all(isinstance(v, dict) for v in result.values()):
                 # Multi-table result
+                from .utils import copy_failed
+
                 total_docs = sum(r['documents_copied'] for r in result.values())
                 console.print(f"[green]✅ Copied {len(result)} {target_engine.table_term_plural}, {format_number(total_docs)} rows[/green]")
+                # Per-table refusals (e.g. no watermark column) must not hide
+                # behind the total.
+                skipped = [name for name, r in result.items() if copy_failed(r)]
+                if skipped:
+                    console.print(f"[yellow]⚠ Skipped {len(skipped)}: {', '.join(skipped)}[/yellow]")
             else:
+                from .utils import copy_failed
+
                 method = result.get('method', 'unknown')
+                if copy_failed(result):
+                    console.print(f"[red]❌ Copy did not run (reason: {method})[/red]")
+                    sys.exit(1)
                 console.print(f"[green]✅ Copied {format_number(result['documents_copied'])} rows (method: {method})[/green]")
 
             # Verification (MongoDB-specific)

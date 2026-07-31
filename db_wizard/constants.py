@@ -75,6 +75,22 @@ DEFAULT_FTP_PORT = 21
 PIPE_TIMEOUT = 600
 
 # ============================================================================
+# Incremental Copy Settings
+# ============================================================================
+
+# Safety overlap for numeric watermarks (rows).
+# With AUTO_INCREMENT ids, a row with a LOWER id can be committed AFTER a row
+# with a higher one (transactions commit out of order). If we resumed exactly
+# from MAX(id) we would skip those late arrivals forever. Copying a few rows
+# back is cheap and the duplicates get discarded by INSERT IGNORE.
+INCREMENTAL_OVERLAP_ROWS = 10
+
+# Safety overlap for time-based watermarks (seconds).
+# Same reasoning, applied to timestamp columns and MongoDB ObjectIds (whose
+# leading 4 bytes are a unix timestamp).
+INCREMENTAL_OVERLAP_SECONDS = 5
+
+# ============================================================================
 # Formatting Thresholds
 # ============================================================================
 

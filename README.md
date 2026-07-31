@@ -74,10 +74,18 @@ dbw --task daily_backup -y
 
 # Run a saved job copying structure only, no data (MySQL/Postgres)
 dbw --task daily_backup --schema-only
+
+# Run a saved job copying only new rows (append-only data)
+dbw --task nightly_events --incremental
 ```
 
 Schema-only can be saved as part of a task (set in the interactive wizard for
 MySQL/Postgres), or forced for a single run with `--schema-only`.
+
+Incremental works the same way: save it on the task (interactive wizard, or
+**Manage saved tasks → Toggle incremental copy**) so every run only appends new
+rows, or force it for a single run with `--incremental`. Tasks marked
+incremental show a `⏩ incremental` marker in `--list-tasks`.
 
 ### Direct Command Line
 
@@ -95,7 +103,16 @@ dbw -s mysql://user:pass@remote:3306/production \
 dbw -s mysql://user:pass@remote:3306/shop \
     -t mysql://root@localhost/shop \
     --source-db shop --schema-only -y
+
+# Incremental: only rows above the target watermark - MySQL/MongoDB
+# For append-only data. Does NOT detect updates or deletes.
+dbw -s mysql://user:pass@remote:3306/shop \
+    -t mysql://root@localhost/shop \
+    --source-db shop --source-collection events --incremental -y
 ```
+
+See [docs/INCREMENTAL_COPY.md](docs/INCREMENTAL_COPY.md) for how the watermark
+is chosen, why the resume point overlaps, and what the flag refuses to do.
 
 ### Backup & Restore
 
@@ -128,6 +145,8 @@ dbw --restore /backups/2025_01_15-production.tar.gz --restore-to mongodb://local
 | `--source-collection` | Specific collection/table (omit for all) |
 | `--drop-target` | Drop target before copying |
 | `--schema-only` | Copy only structure/DDL, no data (MySQL/Postgres only; aborts on MongoDB/Redis) |
+| `--incremental` | Copy only rows above the target watermark, for append-only data (MySQL/MongoDB). Does NOT detect updates or deletes |
+| `--since-column` | Watermark column for `--incremental` (default: `AUTO_INCREMENT` column / `_id`) |
 | `-y, --yes` | Full automation without prompts |
 | `--verify` | Verify integrity after copy (MongoDB) |
 | `--force-python` | Force Python copy instead of mongodump (MongoDB) |

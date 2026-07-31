@@ -8,9 +8,10 @@ import hashlib
 import json
 import shutil
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Self
 
+from bson import ObjectId
 from pymongo import MongoClient
 from pymongo.errors import BulkWriteError
 from rich.console import Console
@@ -24,6 +25,8 @@ from ..constants import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_VERIFICATION_SAMPLE_SIZE,
     CHECKSUM_THRESHOLD,
+    INCREMENTAL_OVERLAP_ROWS,
+    INCREMENTAL_OVERLAP_SECONDS,
     MONGO_SYSTEM_DATABASES,
     PIPE_TIMEOUT,
 )
@@ -103,6 +106,31 @@ class MongoEngine(DatabaseEngine):
     def count_rows(self, database: str, table: str) -> int:
         """Approximate document count."""
         return self.client[database][table].estimated_document_count()
+
+    # -- Incremental copy support --
+
+    supports_incremental = True
+
+    def detect_watermark_column(self, database: str, table: str) -> str | None:
+        """
+        MongoDB has no schema to inspect, so we look at the data: `_id` works as
+        a watermark only when it actually grows. Default ObjectIds do (their
+        first 4 bytes are a timestamp), and so do manually assigned integers.
+        UUIDs and strings do not, and we refuse them rather than copying a
+        random subset of the collection.
+        """
+        doc = self.client[database][table].find_one(sort=[('_id', -1)])
+        if doc is None:
+            # Empty collection: nothing to disprove, _id is the sane default.
+            return '_id'
+        return '_id' if isinstance(doc.get('_id'), (ObjectId, int)) else None
+
+    def max_watermark(self, database: str, table: str, column: str) -> Any | None:
+        """Highest value of `column`. None if the collection is empty or lacks it."""
+        doc = self.client[database][table].find_one(
+            {column: {'$exists': True}}, sort=[(column, -1)]
+        )
+        return doc.get(column) if doc else None
 
     # -- Tools --
 
@@ -220,6 +248,27 @@ class MongoEngine(DatabaseEngine):
             raise ValueError(
                 "MongoDB is schemaless - --schema-only is not supported. "
                 "There is no fixed schema to copy."
+            )
+
+        incremental = kwargs.get('incremental', False)
+        since_column = kwargs.get('since_column')
+
+        # Dropping the target erases the watermark we resume from.
+        if incremental and drop_target:
+            raise ValueError(
+                "--incremental and --drop-target are mutually exclusive: "
+                "dropping the target erases the watermark to resume from."
+            )
+
+        if incremental:
+            if source_table:
+                return self._copy_collection_incremental(
+                    source_engine, source_db, source_table,
+                    target_db, target_table or source_table,
+                    since_column=since_column
+                )
+            return self._copy_database_incremental(
+                source_engine, source_db, target_db, since_column=since_column
             )
 
         if source_table:
@@ -460,6 +509,114 @@ class MongoEngine(DatabaseEngine):
 
         return results
 
+    # -- Incremental copy --
+
+    @staticmethod
+    def _apply_overlap(watermark: Any) -> tuple[Any, str]:
+        """
+        Step the watermark slightly backwards and return (value, operator).
+
+        Documents are not guaranteed to arrive in _id order: ObjectIds are
+        generated client-side, so clock skew between app servers can produce a
+        lower _id inserted after a higher one. Resuming exactly at MAX(_id)
+        would lose those forever. The re-read documents are dropped on insert
+        by the duplicate _id, so the overlap costs nothing but bandwidth.
+        """
+        if isinstance(watermark, ObjectId):
+            # from_datetime zeroes the machine/counter bytes, so the result is
+            # <= every real ObjectId generated in that second.
+            back = watermark.generation_time - timedelta(seconds=INCREMENTAL_OVERLAP_SECONDS)
+            return ObjectId.from_datetime(back), '$gt'
+        if isinstance(watermark, bool):
+            # bool is an int subclass; arithmetic on it is meaningless.
+            return watermark, '$gte'
+        if isinstance(watermark, int):
+            return watermark - INCREMENTAL_OVERLAP_ROWS, '$gt'
+        if isinstance(watermark, datetime):
+            return watermark - timedelta(seconds=INCREMENTAL_OVERLAP_SECONDS), '$gt'
+        # Unknown type: no safe arithmetic, so re-read the boundary value itself.
+        return watermark, '$gte'
+
+    def _copy_collection_incremental(
+        self,
+        source_engine: 'MongoEngine',
+        source_db: str,
+        source_coll: str,
+        target_db: str,
+        target_coll: str,
+        since_column: str | None = None
+    ) -> dict[str, Any]:
+        """
+        Copy only the documents the target is missing, assuming append-only.
+
+        Uses the Python path rather than mongodump|mongorestore: the overlap
+        deliberately re-reads documents the target already has, and
+        insert_many(ordered=False) is the only mode that discards those
+        duplicates cleanly. Incremental batches are small by definition, so the
+        slower path costs little.
+        """
+        column = since_column or source_engine.detect_watermark_column(source_db, source_coll)
+        if not column:
+            console.print(
+                f"[red]✗ {source_db}.{source_coll}: _id is not monotonic (UUID or string?). "
+                f"Pass --since-column to name a field that grows.[/red]"
+            )
+            return {'documents_copied': 0, 'method': 'incremental_no_watermark'}
+
+        watermark = self.max_watermark(target_db, target_coll, column)
+
+        # Nothing in the target: the incremental copy IS the full copy.
+        if watermark is None:
+            console.print(
+                f"[yellow]↻ {target_db}.{target_coll} is empty or missing — full copy this time[/yellow]"
+            )
+            return self._copy_collection(
+                source_engine, source_db, source_coll, target_db, target_coll,
+                drop_target=False, force=True, force_python=False
+            )
+
+        value, operator = self._apply_overlap(watermark)
+        query = {column: {operator: value}}
+
+        source_collection = source_engine.client[source_db][source_coll]
+        pending = source_collection.count_documents(query)
+        console.print(
+            f"[cyan]⏩ Incremental copy of {source_db}.{source_coll}: "
+            f"{format_number(pending)} documents where {column} {operator} {value}[/cyan]"
+        )
+
+        return self._copy_python(
+            source_engine, source_db, source_coll, target_db, target_coll,
+            total_docs=pending, drop_target=False, force=True, force_python=True,
+            query=query, method_name='python_incremental'
+        )
+
+    def _copy_database_incremental(
+        self,
+        source_engine: 'MongoEngine',
+        source_db: str,
+        target_db: str,
+        since_column: str | None = None,
+        exclude_prefixes: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Incremental copy of every collection: each has its own watermark."""
+        exclude = exclude_prefixes or ['system.']
+        collections = [
+            c for c in source_engine.client[source_db].list_collection_names()
+            if not any(c.startswith(ex) for ex in exclude)
+        ]
+
+        console.print(f"[cyan]⏩ Incremental copy of {len(collections)} collections[/cyan]")
+
+        results = {}
+        for coll_name in collections:
+            console.print(f"\n[bold]📁 {coll_name}[/bold]")
+            results[coll_name] = self._copy_collection_incremental(
+                source_engine, source_db, coll_name, target_db, coll_name,
+                since_column=since_column
+            )
+        return results
+
     def _pipe_mongodump(
         self,
         source_uri: str,
@@ -522,13 +679,24 @@ class MongoEngine(DatabaseEngine):
         total_docs: int = 0,
         drop_target: bool = False,
         force: bool = False,
-        force_python: bool = False
+        force_python: bool = False,
+        query: dict[str, Any] | None = None,
+        method_name: str = 'python'
     ) -> dict[str, Any]:
-        """Python fallback copy using pymongo batch inserts."""
+        """
+        Python fallback copy using pymongo batch inserts.
+
+        `query` restricts which documents are read (used by the incremental
+        copy); `method_name` labels the result so callers can tell the two
+        pathways apart.
+        """
         source_collection = source_engine.client[source_db][source_coll]
         target_collection = self.client[target_db][target_coll]
 
-        if force_python:
+        # The incremental caller has already announced what it is about to copy.
+        if query is not None:
+            pass
+        elif force_python:
             console.print("[cyan]📝 Using Python copy mode (--force-python flag set)...[/cyan]")
         else:
             console.print("[yellow]⚠ MongoDB tools not available, using Python copy (slower)...[/yellow]")
@@ -558,7 +726,7 @@ class MongoEngine(DatabaseEngine):
         ) as progress:
             task = progress.add_task("Copying...", total=total_docs)
 
-            for doc in source_collection.find():
+            for doc in source_collection.find(query or {}):
                 batch.append(doc)
 
                 if len(batch) >= DEFAULT_BATCH_SIZE:
@@ -588,7 +756,7 @@ class MongoEngine(DatabaseEngine):
             'documents_copied': copied,
             'indexes_created': indexes_created,
             'source_count': total_docs,
-            'method': 'python',
+            'method': method_name,
         }
 
     def _copy_indexes(

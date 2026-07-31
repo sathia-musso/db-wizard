@@ -13,13 +13,17 @@ console = Console()
 
 
 def run_task(task_config: dict[str, Any], assume_yes: bool = False, force_python: bool = False,
-             schema_only: bool = False) -> bool:
+             schema_only: bool = False, incremental: bool = False,
+             since_column: str | None = None) -> bool:
     """
     Execute a task based on its type.
     Auto-detects engine from URIs in the task config.
 
     schema_only: run a copy task copying only structure/DDL, no data.
                  Ignored for backup/restore tasks (no schema concept there).
+    incremental: run a copy task copying only the rows above the target's
+                 watermark. Same rules: copy tasks only.
+    since_column: watermark column override for incremental.
     """
     task_type = task_config.get('type', 'copy')
 
@@ -29,20 +33,47 @@ def run_task(task_config: dict[str, Any], assume_yes: bool = False, force_python
         elif task_type == 'restore':
             return run_restore_task(task_config)
         else:
-            return run_copy_task(task_config, assume_yes, force_python, schema_only)
+            return run_copy_task(
+                task_config, assume_yes, force_python, schema_only,
+                incremental=incremental, since_column=since_column
+            )
     except Exception as e:
         console.print(f"[red]❌ Task error: {e}[/red]")
         return False
 
 
 def run_copy_task(task_config: dict[str, Any], assume_yes: bool = False, force_python: bool = False,
-                  schema_only: bool = False) -> bool:
+                  schema_only: bool = False, incremental: bool = False,
+                  since_column: str | None = None) -> bool:
     """Execute a copy task using the appropriate engine."""
     from .utils import resolve_host
 
     # schema_only can come from the saved task itself or be forced via the CLI
     # flag for this single run. Either one enables it.
     schema_only = schema_only or task_config.get('schema_only', False)
+
+    # Same for incremental, and the CLI column overrides the saved one.
+    incremental = incremental or task_config.get('incremental', False)
+    since_column = since_column or task_config.get('since_column')
+
+    if incremental:
+        scheme = EngineFactory.detect_scheme(task_config['source_uri'])
+        if scheme not in ('mysql', 'mongodb'):
+            console.print(
+                f"[yellow]⚠ --incremental is not supported for {scheme}. "
+                f"Supported: mysql, mongodb.[/yellow]"
+            )
+            return False
+        if schema_only:
+            console.print("[yellow]⚠ --incremental and --schema-only are mutually exclusive.[/yellow]")
+            return False
+        if task_config.get('drop_target', False):
+            console.print(
+                "[yellow]⚠ This task drops the target, which erases the watermark "
+                "--incremental resumes from. Refusing.[/yellow]"
+            )
+            return False
+        console.print("[cyan]⏩ Incremental: only rows above the target watermark[/cyan]")
 
     # Schema-only is meaningless on schemaless engines: refuse up-front before
     # opening tunnels/connections, instead of copying everything by surprise.
@@ -97,6 +128,8 @@ def run_copy_task(task_config: dict[str, Any], assume_yes: bool = False, force_p
                     force=assume_yes,
                     force_python=task_config.get('force_python', force_python),
                     schema_only=schema_only,
+                    incremental=incremental,
+                    since_column=since_column,
                 )
                 total_docs += result.get('documents_copied', 0)
             console.print(f"[green]✅ Copied {len(source_table)} {target_engine.table_term_plural}, {format_number(total_docs)} rows[/green]")
@@ -112,8 +145,15 @@ def run_copy_task(task_config: dict[str, Any], assume_yes: bool = False, force_p
                 force=assume_yes,
                 force_python=task_config.get('force_python', force_python),
                 schema_only=schema_only,
+                incremental=incremental,
+                since_column=since_column,
             )
+            from .utils import copy_failed
+
             method = result.get('method', 'unknown')
+            if copy_failed(result):
+                console.print(f"[red]❌ Copy did not run (reason: {method})[/red]")
+                return False
             console.print(f"[green]✅ Copied {format_number(result['documents_copied'])} rows (method: {method})[/green]")
         else:
             results = target_engine.copy(
@@ -126,11 +166,19 @@ def run_copy_task(task_config: dict[str, Any], assume_yes: bool = False, force_p
                 force=assume_yes,
                 force_python=task_config.get('force_python', force_python),
                 schema_only=schema_only,
+                incremental=incremental,
+                since_column=since_column,
             )
             # Results can be a dict of dicts (one per table) or a single dict
             if isinstance(results, dict) and all(isinstance(v, dict) for v in results.values()):
+                from .utils import copy_failed
+
                 total_docs = sum(r['documents_copied'] for r in results.values())
                 console.print(f"[green]✅ Copied {len(results)} {target_engine.table_term_plural}, {format_number(total_docs)} rows[/green]")
+                # Per-table refusals must not hide behind the total.
+                skipped = [name for name, r in results.items() if copy_failed(r)]
+                if skipped:
+                    console.print(f"[yellow]⚠ Skipped {len(skipped)}: {', '.join(skipped)}[/yellow]")
             else:
                 docs = results.get('documents_copied', 0)
                 console.print(f"[green]✅ Copied {format_number(docs)} rows[/green]")
@@ -271,3 +319,6 @@ def display_task_summary(task_config: dict[str, Any]) -> None:
         console.print(f"[bold]Drop Target:[/bold] {'Yes' if task_config.get('drop_target') else 'No'}")
         if task_config.get('schema_only'):
             console.print(f"[bold]Schema Only:[/bold] Yes (no data)")
+        if task_config.get('incremental'):
+            column = task_config.get('since_column') or 'auto-detected'
+            console.print(f"[bold]Incremental:[/bold] Yes (watermark: {column})")

@@ -217,6 +217,12 @@ class RedisEngine(DatabaseEngine):
             raise ValueError(
                 "Redis is schemaless (key-value) - --schema-only is not supported."
             )
+        # Keys have no ordering to resume from: there is no watermark concept.
+        if kwargs.get('incremental', False):
+            raise ValueError(
+                "--incremental is not supported for Redis: keys are unordered, "
+                "so there is no watermark to resume from."
+            )
         console.print("[red]Redis cross-copy currently not implemented fully.[/red]")
         return {'documents_copied': 0, 'method': 'unsupported'}
 

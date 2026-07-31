@@ -2,6 +2,35 @@
 
 All notable changes to mongo-wizard will be documented in this file.
 
+## [2.5.0] - 2026-07-31
+
+### Added
+- `--incremental` flag for copy operations: copies only the rows above the
+  target's watermark, for append-only data. It is NOT a diff — updates and
+  deletes on already-copied rows are never detected.
+  - MySQL: `mysqldump --where='<col> > N' --no-create-info --insert-ignore`
+  - MongoDB: filtered `find()` + `insert_many(ordered=False)`
+  - PostgreSQL and Redis are unsupported (`pg_dump` cannot filter rows; Redis
+    keys are unordered) and abort with a clear message.
+- `--since-column` to override the watermark column, which otherwise defaults to
+  the `AUTO_INCREMENT` column (MySQL) or `_id` (MongoDB).
+- The resume point steps back by 10 rows / 5 seconds so rows committed out of id
+  order are not skipped; duplicates are discarded on insert, making the copy
+  idempotent.
+- Incremental is selectable in the interactive wizard and persisted as a task
+  property (`incremental`, `since_column`), so saved jobs append on every run.
+  Existing tasks can be flipped via *Manage saved tasks → Toggle incremental
+  copy*, and are marked `⏩ incremental` in `--list-tasks`.
+- `--incremental` on `--task <name>` forces it for that single run.
+- New engine abstraction: `supports_incremental`, `detect_watermark_column()`
+  and `max_watermark()` on `DatabaseEngine`.
+- Documentation: `docs/INCREMENTAL_COPY.md`.
+
+### Changed
+- Copy refusals and failures are no longer reported as a successful copy of zero
+  rows: the CLI now exits non-zero and saved tasks report failure. Multi-table
+  copies list the tables that were skipped.
+
 ## [2.4.1] - 2026-06-26
 
 ### Added

@@ -76,6 +76,26 @@ class CopyWizardFlow:
         schema_only = False
         if supports_schema_only:
             schema_only = Confirm.ask("[cyan]🏗️  Copy schema only (no data)?[/cyan]", default=False)
+
+        # Incremental copy only makes sense on engines that can filter rows by a
+        # monotonic column, and it contradicts both dropping and schema-only.
+        supports_incremental = (
+            source_engine.supports_incremental and not drop_target and not schema_only
+        )
+        incremental = False
+        since_column = None
+        if supports_incremental:
+            incremental = Confirm.ask(
+                "[cyan]⏩ Incremental copy (only new rows, for append-only data)?[/cyan]",
+                default=False
+            )
+            if incremental:
+                console.print("[dim]Note: updates and deletes on existing rows are NOT detected[/dim]")
+                answer = Prompt.ask(
+                    "Watermark column (blank = auto-detect)",
+                    default=""
+                ).strip()
+                since_column = answer or None
         copy_indexes = True
         if is_mongo:
             copy_indexes = Confirm.ask("[cyan]Copy indexes?[/cyan]", default=True)
@@ -116,6 +136,8 @@ class CopyWizardFlow:
             summary.add_row("Create Backup", "YES 💾")
         if supports_schema_only:
             summary.add_row("Schema Only", "YES (no data)" if schema_only else "NO")
+        if incremental:
+            summary.add_row("Incremental", f"YES (watermark: {since_column or 'auto-detected'})")
         summary.add_row("Copy Indexes", "YES" if copy_indexes else "NO")
         summary.add_row("Verify", "YES" if verify else "NO")
 
@@ -184,7 +206,8 @@ class CopyWizardFlow:
                         source_engine=source_engine,
                         source_db=source_db, source_table=coll_name,
                         target_db=target_db, target_table=coll_name,
-                        drop_target=drop_target, schema_only=schema_only
+                        drop_target=drop_target, schema_only=schema_only,
+                    incremental=incremental, since_column=since_column
                     )
                     results[coll_name] = result
 
@@ -204,7 +227,8 @@ class CopyWizardFlow:
                     source_engine=source_engine,
                     source_db=source_db, source_table=source_collection,
                     target_db=target_db, target_table=target_collection,
-                    drop_target=drop_target, schema_only=schema_only
+                    drop_target=drop_target, schema_only=schema_only,
+                    incremental=incremental, since_column=since_column
                 )
                 console.print(f"[green]✓ Copied {format_number(result['documents_copied'])} rows[/green]")
                 console.print(f"[green]✓ Created {result.get('indexes_created', 0)} indexes[/green]")
@@ -227,7 +251,8 @@ class CopyWizardFlow:
                     source_engine=source_engine,
                     source_db=source_db, source_table=None,
                     target_db=target_db, target_table=None,
-                    drop_target=drop_target, schema_only=schema_only
+                    drop_target=drop_target, schema_only=schema_only,
+                    incremental=incremental, since_column=since_column
                 )
                 if isinstance(results, dict) and all(isinstance(v, dict) for v in results.values()):
                     total_docs = sum(r['documents_copied'] for r in results.values())
@@ -258,6 +283,8 @@ class CopyWizardFlow:
                 'source_collection': source_collection,
                 'target_collection': target_collection,
                 'drop_target': drop_target,
+                'incremental': incremental,
+                'since_column': since_column,
                 'copy_indexes': copy_indexes,
                 'verify': verify,
                 'schema_only': schema_only

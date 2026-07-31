@@ -263,6 +263,15 @@ class PostgresEngine(DatabaseEngine):
             console.print("[red]pg_dump and psql tools are required[/red]")
             return {'documents_copied': 0, 'method': 'failed'}
 
+        # pg_dump cannot filter rows, so an incremental copy would need a
+        # separate COPY (SELECT ... WHERE ...) TO STDOUT pathway. Until that
+        # exists, refuse instead of silently copying the whole database.
+        if kwargs.get('incremental', False):
+            raise ValueError(
+                "--incremental is not supported for PostgreSQL: pg_dump cannot "
+                "filter rows. Use MySQL or MongoDB, or copy in full."
+            )
+
         source_params = source_engine.params
         target_params = self.params
 

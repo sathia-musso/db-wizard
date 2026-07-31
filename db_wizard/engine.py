@@ -63,6 +63,33 @@ class DatabaseEngine(ABC):
         """Approximate row/document count for a table/collection."""
         ...
 
+    # -- Incremental copy support --
+    #
+    # Incremental copy is NOT a diff: it never detects UPDATEs or DELETEs.
+    # It answers two questions and copies whatever sits above the answer:
+    #   1. which column grows monotonically?   -> detect_watermark_column()
+    #   2. how far did the target already get? -> max_watermark()
+    # Engines that cannot filter rows by such a column leave the defaults
+    # below and the copy layer refuses the flag with a clear message.
+
+    supports_incremental: bool = False
+
+    def detect_watermark_column(self, database: str, table: str) -> str | None:
+        """
+        Return the name of a monotonically increasing column usable as a
+        watermark (AUTO_INCREMENT primary key, ObjectId field, ...), or None
+        when the table has nothing suitable.
+        """
+        return None
+
+    def max_watermark(self, database: str, table: str, column: str) -> Any | None:
+        """
+        Highest value of `column` in `table`, or None when the table does not
+        exist or is empty. Both cases mean the same thing to the caller:
+        there is no watermark to resume from, so copy everything.
+        """
+        return None
+
     # -- Tools --
 
     @abstractmethod
@@ -127,6 +154,11 @@ class DatabaseEngine(ABC):
         This is the main copy pathway:
         - Mongo: mongodump --archive | mongorestore --archive (or Python fallback)
         - MySQL: mysqldump ... | mysql ...
+
+        Recognised kwargs:
+            schema_only: bool  -- copy structure/DDL only, no rows
+            incremental: bool  -- copy only rows above the target's watermark
+            since_column: str  -- watermark column override for incremental
 
         Returns result dict with at least:
             'documents_copied': int, 'method': str
