@@ -402,8 +402,8 @@ class TestCopyFailedDetection:
         from db_wizard.utils import copy_failed
 
         for method in ('incremental_no_watermark', 'incremental_rename_unsupported',
-                       'incremental_failed', 'mysqldump_failed', 'mysqldump_timeout',
-                       'error', 'unsupported'):
+                       'incremental_failed', 'mysqldump_failed', 'mysqldump_interrupted',
+                       'interrupted', 'error', 'unsupported'):
             assert copy_failed({'method': method}) is True, method
 
     def test_real_copies_are_not_flagged(self):

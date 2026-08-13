@@ -71,8 +71,10 @@ DEFAULT_FTP_PORT = 21
 # Dump/Restore Settings
 # ============================================================================
 
-# Timeout for dump|restore pipe operations (10 minutes)
-PIPE_TIMEOUT = 600
+# NOTE: there is intentionally no timeout for dump|restore pipes. A big database
+# legitimately takes hours to copy, and a wall-clock deadline cannot tell that
+# apart from a hung process - it would only truncate healthy transfers.
+# See utils.wait_for_dump_pipe().
 
 # ============================================================================
 # Incremental Copy Settings

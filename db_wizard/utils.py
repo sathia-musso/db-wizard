@@ -3,6 +3,7 @@ Generic utility functions for db-wizard.
 No database-specific imports here - all engine-specific code lives in engines/.
 """
 
+import subprocess
 from typing import Any
 
 from rich.console import Console
@@ -373,13 +374,46 @@ def format_task_table_row(
 # Suffixes of the 'method' field that mean the copy did NOT happen.
 # Engines report refusals and failures there, and a refusal must never be
 # announced as a successful copy of zero rows.
-_FAILED_METHOD_SUFFIXES = ('failed', 'error', 'timeout', 'unsupported', 'no_watermark')
+_FAILED_METHOD_SUFFIXES = ('failed', 'error', 'timeout', 'unsupported', 'no_watermark', 'interrupted')
 
 
 def copy_failed(result: dict[str, Any]) -> bool:
     """True when a copy result describes a refusal or a failure, not a copy."""
     method = result.get('method', '')
     return any(method.endswith(suffix) for suffix in _FAILED_METHOD_SUFFIXES)
+
+
+# ============================================================================
+# Dump | Restore Pipes
+# ============================================================================
+
+
+def wait_for_dump_pipe(
+    dump_process: 'subprocess.Popen', restore_process: 'subprocess.Popen'
+) -> tuple[bool, bytes, bytes]:
+    """
+    Wait for a `dump | restore` pipe to finish and return
+    (interrupted, restore_stderr, dump_stderr).
+
+    There is deliberately NO wall-clock timeout here. A dump of a large database
+    legitimately runs for hours, and a fixed deadline cannot tell "still working"
+    from "hung": it would just kill a healthy transfer halfway and leave the
+    target truncated. The escape hatch is Ctrl-C, which kills both ends of the
+    pipe and is reported back as an interruption, never as a successful copy.
+
+    Callers that want a hard limit can wrap the whole CLI, e.g. `timeout 3h db-wizard ...`.
+    """
+    try:
+        _, restore_stderr = restore_process.communicate()
+        dump_stderr = dump_process.stderr.read()
+        return False, restore_stderr or b'', dump_stderr or b''
+    except KeyboardInterrupt:
+        # Kill both ends, then reap them so we do not leave zombies behind.
+        restore_process.kill()
+        dump_process.kill()
+        restore_process.wait()
+        dump_process.wait()
+        return True, b'', b''
 
 
 # Re-export for backward compatibility

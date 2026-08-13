@@ -229,8 +229,8 @@ class TestMySQLEngineCopy:
     @patch('shutil.which', return_value='/usr/bin/mysql')
     @patch('subprocess.Popen')
     @patch('subprocess.run')
-    def test_copy_table_timeout(self, mock_run, mock_popen, mock_which):
-        """Test pipe timeout handling"""
+    def test_copy_table_interrupted(self, mock_run, mock_popen, mock_which):
+        """Ctrl-C during the pipe must kill both processes and report an interruption"""
         mock_run.return_value = MagicMock(returncode=0, stdout="100\n")
 
         mock_dump = MagicMock()
@@ -238,7 +238,7 @@ class TestMySQLEngineCopy:
         mock_dump.stderr = MagicMock()
 
         mock_restore = MagicMock()
-        mock_restore.communicate.side_effect = subprocess.TimeoutExpired(cmd="mysql", timeout=600)
+        mock_restore.communicate.side_effect = KeyboardInterrupt()
 
         mock_popen.side_effect = [mock_dump, mock_restore]
 
@@ -251,9 +251,44 @@ class TestMySQLEngineCopy:
             target_db="tgtdb", target_table="users"
         )
 
-        assert result['method'] == 'mysqldump_timeout'
+        assert result['method'] == 'mysqldump_interrupted'
         mock_restore.kill.assert_called_once()
         mock_dump.kill.assert_called_once()
+
+    @patch('shutil.which', return_value='/usr/bin/mysql')
+    @patch('subprocess.Popen')
+    @patch('subprocess.run')
+    def test_copy_table_has_no_wall_clock_timeout(self, mock_run, mock_popen, mock_which):
+        """
+        A slow dump must never be killed on a deadline: communicate() is called
+        without a timeout so a multi-hour copy of a large table runs to the end.
+        """
+        mock_run.return_value = MagicMock(returncode=0, stdout="100\n")
+
+        mock_dump = MagicMock()
+        mock_dump.stdout = MagicMock()
+        mock_dump.stderr = MagicMock()
+        mock_dump.stderr.read.return_value = b""
+
+        mock_restore = MagicMock()
+        mock_restore.returncode = 0
+        mock_restore.communicate.return_value = (None, b"")
+
+        mock_popen.side_effect = [mock_dump, mock_restore]
+
+        source = MySQLEngine("mysql://user:pass@remote/srcdb")
+        target = MySQLEngine("mysql://user:pass@localhost/tgtdb")
+
+        target.copy(
+            source_engine=source,
+            source_db="srcdb", source_table="users",
+            target_db="tgtdb", target_table="users"
+        )
+
+        assert 'timeout' not in mock_restore.communicate.call_args.kwargs
+        assert mock_restore.communicate.call_args.args == ()
+        mock_restore.kill.assert_not_called()
+        mock_dump.kill.assert_not_called()
 
     @patch('shutil.which', return_value=None)
     def test_copy_without_tools(self, mock_which):

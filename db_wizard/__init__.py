@@ -5,7 +5,7 @@ A multi-database management tool with features for copying,
 backing up, and migrating databases. Supports MongoDB and MySQL.
 """
 
-__version__ = "2.5.0"
+__version__ = "2.5.1"
 __author__ = "Sathia Musso"
 
 from .engine import DatabaseEngine, EngineFactory

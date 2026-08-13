@@ -20,8 +20,8 @@ from ..constants import (
     DEFAULT_MYSQL_PORT,
     INCREMENTAL_OVERLAP_ROWS,
     MYSQL_SYSTEM_DATABASES,
-    PIPE_TIMEOUT,
 )
+from ..utils import wait_for_dump_pipe
 
 console = Console()
 
@@ -124,7 +124,7 @@ def _run_dump_pipe(
 ) -> tuple[bool, str]:
     """
     Run `dump_cmd | restore_cmd` and report (success, error_message).
-    Both processes are killed if the pipe outlives PIPE_TIMEOUT.
+    The pipe runs until it finishes; Ctrl-C kills both processes.
     """
     try:
         dump_process = subprocess.Popen(
@@ -137,13 +137,9 @@ def _run_dump_pipe(
         )
         dump_process.stdout.close()
 
-        try:
-            _, restore_stderr = restore_process.communicate(timeout=PIPE_TIMEOUT)
-            dump_stderr = dump_process.stderr.read()
-        except subprocess.TimeoutExpired:
-            restore_process.kill()
-            dump_process.kill()
-            return False, f"timed out after {PIPE_TIMEOUT // 60} minutes"
+        interrupted, restore_stderr, dump_stderr = wait_for_dump_pipe(dump_process, restore_process)
+        if interrupted:
+            return False, "interrupted by user"
 
         if restore_process.returncode != 0:
             return False, (restore_stderr or dump_stderr or b'').decode('utf-8', errors='replace').strip()
@@ -583,14 +579,10 @@ class MySQLEngine(DatabaseEngine):
             restore_process = subprocess.Popen(restore_cmd, env=_get_mysql_env(target_params), stdin=dump_process.stdout, stderr=subprocess.PIPE)
             dump_process.stdout.close()
 
-            try:
-                _, restore_stderr = restore_process.communicate(timeout=PIPE_TIMEOUT)
-                dump_stderr = dump_process.stderr.read()
-            except subprocess.TimeoutExpired:
-                restore_process.kill()
-                dump_process.kill()
-                console.print(f"[red]mysqldump | mysql timed out after {PIPE_TIMEOUT // 60} minutes[/red]")
-                return {'documents_copied': 0, 'method': 'mysqldump_timeout'}
+            interrupted, restore_stderr, dump_stderr = wait_for_dump_pipe(dump_process, restore_process)
+            if interrupted:
+                console.print("[yellow]Interrupted: mysqldump | mysql stopped, target may be incomplete[/yellow]")
+                return {'documents_copied': 0, 'method': 'mysqldump_interrupted'}
 
             if restore_process.returncode != 0:
                 error_msg = (restore_stderr or dump_stderr or b'').decode('utf-8', errors='replace').strip()
@@ -800,14 +792,10 @@ class MySQLEngine(DatabaseEngine):
                 restore_process = subprocess.Popen(restore_cmd, env=_get_mysql_env(target_params), stdin=dump_process.stdout, stderr=subprocess.PIPE)
                 dump_process.stdout.close()
 
-                try:
-                    _, restore_stderr = restore_process.communicate(timeout=PIPE_TIMEOUT)
-                    dump_stderr = dump_process.stderr.read()
-                except subprocess.TimeoutExpired:
-                    restore_process.kill()
-                    dump_process.kill()
-                    console.print(f"[red]Timed out after {PIPE_TIMEOUT // 60} minutes[/red]")
-                    return {'documents_copied': 0, 'method': 'mysqldump_timeout'}
+                interrupted, restore_stderr, dump_stderr = wait_for_dump_pipe(dump_process, restore_process)
+                if interrupted:
+                    console.print("[yellow]Interrupted: copy stopped, target may be incomplete[/yellow]")
+                    return {'documents_copied': 0, 'method': 'mysqldump_interrupted'}
 
                 if restore_process.returncode != 0:
                     error_msg = (restore_stderr or dump_stderr or b'').decode('utf-8', errors='replace').strip()

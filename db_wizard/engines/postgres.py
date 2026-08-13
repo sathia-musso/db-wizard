@@ -15,8 +15,8 @@ from rich.console import Console
 from ..engine import DatabaseEngine
 from ..constants import (
     DEFAULT_CONNECTION_TIMEOUT,
-    PIPE_TIMEOUT,
 )
+from ..utils import wait_for_dump_pipe
 
 console = Console()
 
@@ -308,16 +308,13 @@ class PostgresEngine(DatabaseEngine):
             restore_process = subprocess.Popen(restore_cmd, env=restore_env, stdin=dump_process.stdout, stderr=subprocess.PIPE)
             dump_process.stdout.close()
 
-            try:
-                _, restore_stderr = restore_process.communicate(timeout=PIPE_TIMEOUT)
-                dump_stderr = dump_process.stderr.read()
-            except subprocess.TimeoutExpired:
-                restore_process.kill()
-                dump_process.kill()
-                return {'documents_copied': 0, 'method': 'timeout'}
+            interrupted, restore_stderr, dump_stderr = wait_for_dump_pipe(dump_process, restore_process)
+            if interrupted:
+                console.print("[yellow]Interrupted: pg_dump | pg_restore stopped, target may be incomplete[/yellow]")
+                return {'documents_copied': 0, 'method': 'interrupted'}
 
             if restore_process.returncode != 0:
-                console.print(f"[red]pg_restore failed: {restore_stderr.decode()}[/red]")
+                console.print(f"[red]pg_restore failed: {restore_stderr.decode(errors='replace')}[/red]")
                 return {'documents_copied': 0, 'method': 'error'}
 
         except Exception as e:

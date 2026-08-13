@@ -261,12 +261,18 @@ class TestTarfilePathTraversal:
 # ===========================================================================
 
 class TestMongodumpTimeout:
-    """Bug #9: _pipe_mongodump must have timeout and capture stderr"""
+    """
+    Bug #9: _pipe_mongodump must capture stderr and stay killable.
+
+    The original fix used a 10-minute wall-clock timeout, which killed healthy
+    copies of large databases. The pipe now runs to completion and Ctrl-C is
+    what stops it.
+    """
 
     @patch('db_wizard.engines.mongo.shutil.which', return_value='/usr/bin/mongodump')
     @patch('subprocess.Popen')
-    def test_mongodump_timeout_kills_processes(self, mock_popen, mock_which):
-        """If mongodump/restore hangs, processes must be killed after timeout"""
+    def test_mongodump_interrupt_kills_processes(self, mock_popen, mock_which):
+        """Ctrl-C during the pipe must kill both processes"""
         from db_wizard.engines.mongo import MongoEngine
 
         mock_dump = MagicMock()
@@ -275,7 +281,7 @@ class TestMongodumpTimeout:
         mock_dump.stderr.read.return_value = b""
 
         mock_restore = MagicMock()
-        mock_restore.communicate.side_effect = subprocess.TimeoutExpired(cmd="mongorestore", timeout=600)
+        mock_restore.communicate.side_effect = KeyboardInterrupt()
 
         mock_popen.side_effect = [mock_dump, mock_restore]
 
@@ -287,6 +293,31 @@ class TestMongodumpTimeout:
         assert result is False
         mock_restore.kill.assert_called_once()
         mock_dump.kill.assert_called_once()
+
+    @patch('db_wizard.engines.mongo.shutil.which', return_value='/usr/bin/mongodump')
+    @patch('subprocess.Popen')
+    def test_mongodump_has_no_wall_clock_timeout(self, mock_popen, mock_which):
+        """A slow mongodump must not be killed on a deadline"""
+        from db_wizard.engines.mongo import MongoEngine
+
+        mock_dump = MagicMock()
+        mock_dump.stdout = MagicMock()
+        mock_dump.stderr = MagicMock()
+        mock_dump.stderr.read.return_value = b""
+
+        mock_restore = MagicMock()
+        mock_restore.returncode = 0
+        mock_restore.communicate.return_value = (None, b"")
+
+        mock_popen.side_effect = [mock_dump, mock_restore]
+
+        engine = MongoEngine("mongodb://target")
+        engine.client = MagicMock()
+
+        assert engine._pipe_mongodump("mongodb://source", "db", "coll", "db", "coll") is True
+        assert 'timeout' not in mock_restore.communicate.call_args.kwargs
+        assert mock_restore.communicate.call_args.args == ()
+        mock_restore.kill.assert_not_called()
 
     @patch('db_wizard.engines.mongo.shutil.which', return_value='/usr/bin/mongodump')
     @patch('subprocess.Popen')

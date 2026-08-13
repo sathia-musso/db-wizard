@@ -28,8 +28,8 @@ from ..constants import (
     INCREMENTAL_OVERLAP_ROWS,
     INCREMENTAL_OVERLAP_SECONDS,
     MONGO_SYSTEM_DATABASES,
-    PIPE_TIMEOUT,
 )
+from ..utils import wait_for_dump_pipe
 
 console = Console()
 
@@ -648,13 +648,9 @@ class MongoEngine(DatabaseEngine):
             restore_process = subprocess.Popen(restore_cmd, stdin=dump_process.stdout, stderr=subprocess.PIPE)
             dump_process.stdout.close()
 
-            try:
-                _, restore_stderr = restore_process.communicate(timeout=PIPE_TIMEOUT)
-                dump_stderr = dump_process.stderr.read()
-            except subprocess.TimeoutExpired:
-                restore_process.kill()
-                dump_process.kill()
-                console.print(f"[red]mongodump/restore timed out after {PIPE_TIMEOUT // 60} minutes[/red]")
+            interrupted, restore_stderr, dump_stderr = wait_for_dump_pipe(dump_process, restore_process)
+            if interrupted:
+                console.print("[yellow]Interrupted: mongodump/restore stopped, target may be incomplete[/yellow]")
                 return False
 
             if restore_process.returncode != 0:

@@ -2,6 +2,21 @@
 
 All notable changes to mongo-wizard will be documented in this file.
 
+## [2.5.1] - 2026-08-13
+
+### Fixed
+- Removed the 10-minute wall-clock timeout on `dump | restore` pipes. A large
+  database legitimately takes hours to copy, and a fixed deadline cannot tell
+  "still working" from "hung": it killed healthy transfers halfway through and
+  left the target truncated. Affected every engine (MySQL, MongoDB,
+  PostgreSQL).
+- Pipes now run to completion. Ctrl-C kills and reaps both ends, and the copy is
+  reported as interrupted (`mysqldump_interrupted`, `interrupted`) instead of
+  being announced as a successful copy of zero rows. Callers wanting a hard
+  limit can wrap the CLI, e.g. `timeout 3h db-wizard ...`.
+- `pg_restore` stderr is decoded with `errors='replace'`, so non-UTF8 output no
+  longer raises while reporting an unrelated failure.
+
 ## [2.5.0] - 2026-07-31
 
 ### Added
