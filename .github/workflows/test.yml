@@ -74,8 +74,13 @@ jobs:
 
     - name: Install MongoDB Database Tools
       run: |
-        wget -qO - https://www.mongodb.org/static/pgp/server-7.0.asc | sudo apt-key add -
-        echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+        # apt-key is gone from current Ubuntu runners (ubuntu-latest is 26.04):
+        # store the key in a keyring and reference it with signed-by.
+        # MongoDB publishes a noble (24.04) repo only for 8.0; the database
+        # tools are static Go binaries, independent of the server version,
+        # so they also work against the 5.0/6.0/7.0 containers in the matrix.
+        curl -fsSL https://pgp.mongodb.com/server-8.0.asc | sudo gpg --dearmor -o /usr/share/keyrings/mongodb-server-8.0.gpg
+        echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg ] https://repo.mongodb.org/apt/ubuntu noble/mongodb-org/8.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-8.0.list
         sudo apt-get update
         sudo apt-get install -y mongodb-database-tools
 
@@ -141,8 +146,13 @@ jobs:
         # Install MongoDB tools
         sudo apt-get update
         sudo apt-get install -y wget gnupg
-        wget -qO - https://www.mongodb.org/static/pgp/server-7.0.asc | sudo apt-key add -
-        echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+        # apt-key is gone from current Ubuntu runners (ubuntu-latest is 26.04):
+        # store the key in a keyring and reference it with signed-by.
+        # MongoDB publishes a noble (24.04) repo only for 8.0; the database
+        # tools are static Go binaries, independent of the server version,
+        # so they also work against the 5.0/6.0/7.0 containers in the matrix.
+        curl -fsSL https://pgp.mongodb.com/server-8.0.asc | sudo gpg --dearmor -o /usr/share/keyrings/mongodb-server-8.0.gpg
+        echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg ] https://repo.mongodb.org/apt/ubuntu noble/mongodb-org/8.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-8.0.list
         sudo apt-get update
         sudo apt-get install -y mongodb-database-tools
 
@@ -215,8 +225,10 @@ jobs:
 
     - name: Check dependencies for vulnerabilities
       run: |
-        pip install -r requirements.txt
-        safety check --json
+        # Scan the project's declared dependencies only. A bare `safety check`
+        # scans the whole runner environment and fails on packages the image
+        # ships (e.g. its own setuptools), which are not ours to pin.
+        safety check -r requirements.txt --json
 
   publish-test:
     name: Test Package Build
