@@ -48,9 +48,10 @@ class ManageTasksFlow:
                 console.print("  [cyan]2.[/cyan] Delete task")
                 console.print("  [cyan]3.[/cyan] Export tasks to file")
                 console.print("  [cyan]5.[/cyan] Toggle incremental copy")
+                console.print("  [cyan]6.[/cyan] Edit before/after commands")
             console.print("  [cyan]4.[/cyan] Back to main menu")
 
-            choices = ["1", "2", "3", "4", "5"] if saved_tasks_list else ["4"]
+            choices = ["1", "2", "3", "4", "5", "6"] if saved_tasks_list else ["4"]
             choice = Prompt.ask("Choose option", choices=choices)
 
             if choice == "1" and saved_tasks_list:
@@ -78,8 +79,61 @@ class ManageTasksFlow:
                 Prompt.ask("Press Enter to continue")
             elif choice == "5" and saved_tasks_list:
                 self._toggle_incremental(saved_tasks_list)
+            elif choice == "6" and saved_tasks_list:
+                self._edit_hooks(saved_tasks_list)
             elif choice == "4":
                 break
+
+    def _edit_hooks(self, saved_tasks_list):
+        """
+        Set or clear a task's before_command / after_command.
+
+        One shell command line per hook here: chain several with `&&` (stop
+        at the first failure) or `;`. A list of commands is also accepted,
+        but only by editing the settings file; this editor shows it joined
+        with ' && ', which runs the same way (stop at the first failure).
+        Rules and caveats (no shell aliases!) are in hooks.py.
+        """
+        from ..hooks import AFTER, BEFORE, hook_commands
+
+        while True:
+            try:
+                idx = int(Prompt.ask("Select task"))
+                if 1 <= idx <= len(saved_tasks_list):
+                    break
+                console.print(f"[red]Please enter a number between 1 and {len(saved_tasks_list)}[/red]")
+            except ValueError:
+                console.print("[red]Please enter a valid number[/red]")
+
+        task_name, task_config = saved_tasks_list[idx - 1]
+
+        console.print(f"\n[bold]Hooks for '{task_name}'[/bold]")
+        console.print("[dim]Shell commands run with /bin/sh: ~/.zshrc aliases are NOT available.[/dim]")
+        console.print("[dim]Before fails -> task not run. Task fails -> after skipped.[/dim]")
+        console.print("[dim]Enter keeps the current value, '-' removes it.[/dim]")
+
+        changed = False
+        for key, label in ((BEFORE, 'Before'), (AFTER, 'After')):
+            try:
+                current = ' && '.join(hook_commands(task_config, key))
+            except ValueError:
+                # A broken value is shown raw so it can be replaced.
+                current = str(task_config.get(key))
+            answer = Prompt.ask(f"{label} command", default=current or "", show_default=bool(current)).strip()
+            if answer == '-':
+                if key in task_config:
+                    task_config.pop(key)
+                    changed = True
+            elif answer and answer != current:
+                task_config[key] = answer
+                changed = True
+
+        if changed:
+            self.wizard.settings_manager.add_task(task_name, task_config)
+            console.print(f"[green]✓ Hooks saved for '{task_name}'[/green]")
+        else:
+            console.print("[dim]No changes[/dim]")
+        Prompt.ask("Press Enter to continue")
 
     def _toggle_incremental(self, saved_tasks_list):
         """

@@ -280,8 +280,15 @@ def format_task_table_row(
 
     # Handle collection/table display
     coll = task_config.get('source_collection', 'ALL')
+    from .table_selection import has_patterns
+
     if isinstance(coll, list):
-        coll_display = f"{len(coll)} items"
+        # Patterns are resolved at run time, so their match count is unknown
+        # here (no connection in fast mode): show the patterns themselves.
+        if has_patterns(coll):
+            coll_display = ", ".join(coll) if len(coll) <= 3 else f"{len(coll)} entries (patterns)"
+        else:
+            coll_display = f"{len(coll)} items"
         collection_list = coll
     elif coll and coll != 'ALL':
         coll_display = str(coll)
@@ -308,7 +315,7 @@ def format_task_table_row(
                     source_engine.connect(timeout=3000)
                     source_count_int = 0
                     if collection_list:
-                        for c in collection_list:
+                        for c in _countable_tables(source_engine, source_db, collection_list):
                             try:
                                 source_count_int += source_engine.count_rows(source_db, c)
                             except Exception:
@@ -329,7 +336,7 @@ def format_task_table_row(
                     target_engine.connect(timeout=3000)
                     target_count_int = 0
                     if collection_list:
-                        for c in collection_list:
+                        for c in _countable_tables(target_engine, target_db, collection_list):
                             try:
                                 target_count_int += target_engine.count_rows(target_db, c)
                             except Exception:
@@ -369,6 +376,26 @@ def format_task_table_row(
     source_target = f"{source_part} → {target_part}"
 
     return task_name, source_target, coll_display
+
+
+def _countable_tables(engine, database: str, entries: list[str]) -> list[str]:
+    """
+    Turn a task's table selection into concrete names for --count.
+
+    Without this, count_rows('compliance_*') raises, the error is swallowed
+    and the pattern silently counts as zero rows. Patterns are resolved
+    against the engine's own tables (source or target), so the target count
+    reflects what is there now; a pattern matching nothing counts as zero
+    instead of aborting the listing.
+    """
+    from .table_selection import has_patterns, resolve_tables
+
+    if not has_patterns(entries):
+        return entries
+    try:
+        return resolve_tables(entries, [t['name'] for t in engine.list_tables(database)])
+    except ValueError:
+        return []
 
 
 # Suffixes of the 'method' field that mean the copy did NOT happen.

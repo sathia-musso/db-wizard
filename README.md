@@ -87,6 +87,54 @@ Incremental works the same way: save it on the task (interactive wizard, or
 rows, or force it for a single run with `--incremental`. Tasks marked
 incremental show a `⏩ incremental` marker in `--list-tasks`.
 
+### Selecting tables with patterns
+
+A task's `source_collection` can mix exact names and shell-style patterns:
+
+```json
+"source_collection": ["users", "audit*", "compliance_*", "!*_backup"]
+```
+
+- `*`, `?` and `[...]` are globs, matched case-sensitively against the
+  source's tables **at run time**: the task keeps the pattern, so new tables
+  are picked up on the next run without editing the settings.
+- `!pattern` excludes its matches, wherever it sits in the list. A list made
+  only of exclusions means "everything except".
+- Matched tables keep their names on the target: leave `target_collection`
+  out (or identical to `source_collection`). Positional renaming only works
+  with plain names, and both lists must have the same length.
+- A pattern that matches nothing aborts the run before anything is copied
+  (usually a typo, or a source that returned no tables).
+- The interactive wizard accepts the same syntax in multi-selection mode,
+  next to numbers and ranges: `1-3,users,compliance_*,!*_backup`.
+- Redis is the exception: its entries are key patterns and are passed to the
+  engine as they are.
+
+### Running commands before and after a task
+
+A saved task can run shell commands around itself:
+
+```json
+"CMP": {
+  "...": "...",
+  "before_command": "echo starting",
+  "after_command": ["reset-dev-passwords", "touch ~/cmp.done"]
+}
+```
+
+- Each key takes a string or a list of strings; works for copy, backup and
+  restore tasks.
+- `before_command` fails (non-zero exit) → the task does not run.
+- The task fails → `after_command` is skipped (a half-copied target is not
+  something to post-process), and dbw says so.
+- `after_command` fails → the task fails, so `dbw --task X -y && next` stops.
+- In a list, the first failing command stops the rest.
+- Commands run with `/bin/sh -c` in the current directory, output straight to
+  the terminal, no timeout. **Shell aliases from `~/.zshrc` do not exist
+  there**: put the command in a script on your PATH, or write it in full.
+- The task summary shown before confirming lists every hook. They can also be
+  set from **Manage saved tasks → Edit before/after commands**.
+
 ### Direct Command Line
 
 ```bash

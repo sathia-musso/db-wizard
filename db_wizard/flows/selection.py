@@ -1,3 +1,4 @@
+import re
 from typing import Any
 from rich import box
 from rich.console import Console
@@ -7,6 +8,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.prompt import Confirm, Prompt, IntPrompt
 
 from ..formatting import format_number
+from ..table_selection import has_patterns, is_pattern, resolve_tables
 from ._common import _ask, _test_connection
 
 console = Console()
@@ -215,6 +217,57 @@ class SelectionFlow:
             except ValueError:
                 console.print("[red]Please enter a valid number[/red]")
 
+    @staticmethod
+    def _parse_multi_selection(selection: str, names: list[str], expand_patterns: bool = True) -> list[str]:
+        """
+        Parse the multi-selection prompt into a list of entries.
+
+        Each comma-separated token is one of:
+          - a number (1-based index into `names`),
+          - a range of numbers ("3-7"),
+          - an exact table name, which must exist,
+          - a glob pattern or a `!` exclusion, kept verbatim.
+
+        Numbers and ranges become concrete names; patterns stay patterns, so
+        the saved task re-resolves them on every run. A range is only
+        recognised as digits-dash-digits: table names containing a dash
+        ("events-2024") are names, not broken ranges.
+
+        Raises ValueError for an unknown name or a pattern that matches
+        nothing, so a typo is caught here rather than on the first run.
+
+        With `expand_patterns=False` (Redis) any typed token is accepted
+        as-is: it is a key pattern for the engine, not a table name.
+        """
+        selected: list[str] = []
+        for part in (p.strip() for p in selection.split(',')):
+            if not part:
+                continue
+            range_match = re.fullmatch(r'(\d+)\s*-\s*(\d+)', part)
+            if range_match:
+                start, end = int(range_match.group(1)), int(range_match.group(2))
+                selected.extend(names[i - 1] for i in range(start, end + 1) if 1 <= i <= len(names))
+            elif part.isdigit():
+                idx = int(part)
+                if 1 <= idx <= len(names):
+                    selected.append(names[idx - 1])
+            elif not expand_patterns or is_pattern(part):
+                selected.append(part)
+            elif part in names:
+                selected.append(part)
+            else:
+                raise ValueError(f"'{part}' is not a table in this database")
+
+        # De-duplicate, keeping the first occurrence.
+        seen: set[str] = set()
+        selected = [x for x in selected if not (x in seen or seen.add(x))]
+
+        if expand_patterns and has_patterns(selected):
+            # Fail on a pattern that matches nothing (the resolver raises).
+            resolve_tables(selected, names)
+        return selected
+
+
     def select_collection(self, engine, database: str, purpose: str = "source", allow_all: bool = True,
                           allow_multiple: bool = False) -> Any | None:
         """Select collection/table from database. Accepts a DatabaseEngine."""
@@ -273,6 +326,8 @@ class SelectionFlow:
             if allow_multiple:
                 console.print("\n[yellow]💡 Multiple selection mode:[/yellow]")
                 console.print("[dim]Enter numbers separated by commas (e.g., 1,3,5) or ranges (e.g., 1-5)[/dim]")
+                console.print("[dim]Names and patterns work too: users,audit*,compliance_*,!compliance_*_backup[/dim]")
+                console.print("[dim]Patterns are saved as typed and re-resolved on every run[/dim]")
                 console.print("[dim]Enter 0 for ALL collections, or leave empty to cancel[/dim]")
 
                 selection = Prompt.ask("\nSelect collections")
@@ -287,34 +342,32 @@ class SelectionFlow:
                 if selection == "0":
                     return None  # All collections
 
-                selected = []
                 try:
-                    parts = selection.split(',')
-                    for part in parts:
-                        part = part.strip()
-                        if '-' in part:
-                            start, end = part.split('-')
-                            start, end = int(start.strip()), int(end.strip())
-                            for i in range(start, end + 1):
-                                if 1 <= i <= len(collections):
-                                    selected.append(collections[i - 1]['name'])
-                        else:
-                            idx = int(part)
-                            if 1 <= idx <= len(collections):
-                                selected.append(collections[idx - 1]['name'])
-
-                    seen = set()
-                    selected = [x for x in selected if not (x in seen or seen.add(x))]
-
-                    if selected:
-                        console.print(f"[green]✅ Selected {len(selected)} collections: {', '.join(selected[:3])}{'...' if len(selected) > 3 else ''}[/green]")
-                        return selected
-                    else:
-                        console.print("[red]No valid collections selected[/red]")
-                        return []
-                except Exception as e:
+                    selected = self._parse_multi_selection(
+                        selection, [c['name'] for c in collections],
+                        expand_patterns=getattr(engine, 'supports_table_patterns', True),
+                    )
+                except ValueError as e:
                     console.print(f"[red]Invalid selection: {e}[/red]")
                     return []
+
+                if not selected:
+                    console.print("[red]No valid collections selected[/red]")
+                    return []
+
+                if getattr(engine, 'supports_table_patterns', True) and has_patterns(selected):
+                    # Preview what the patterns match NOW. The task keeps the
+                    # patterns, so a later run may match more (new tables).
+                    resolved = resolve_tables(selected, [c['name'] for c in collections])
+                    console.print(
+                        f"[green]✅ {', '.join(selected)} → {len(resolved)} {term_plural} today:[/green] "
+                        f"[dim]{', '.join(resolved)}[/dim]"
+                    )
+                    if not Confirm.ask("Use this selection?", default=True):
+                        continue
+                else:
+                    console.print(f"[green]✅ Selected {len(selected)} collections: {', '.join(selected[:3])}{'...' if len(selected) > 3 else ''}[/green]")
+                return selected
 
             else:
                 choice_str = _ask(f"\nSelect {term} (0 for ALL)" if allow_all else f"\nSelect {term}")

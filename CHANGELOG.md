@@ -2,6 +2,42 @@
 
 All notable changes to mongo-wizard will be documented in this file.
 
+## [2.6.0] - 2026-10-29
+
+### Added
+- Glob patterns in a task's `source_collection`: `"compliance_*"`, `"audit*"`,
+  `"audit_[wg]*"`. They are saved as typed and expanded against the source's
+  tables on every run, so tables created after the task was saved are copied
+  without editing the settings file. Matching is case-sensitive.
+- Exclusions with a leading `!`: `["workforce_*", "!*_backup"]`. An exclusion
+  removes its matches whatever entry added them; a list made only of
+  exclusions starts from all the source's tables.
+- The interactive multi-selection accepts names and patterns next to numbers
+  and ranges (`1-3,users,compliance_*,!*_backup`), previews what the patterns
+  match today and saves the patterns, not the snapshot.
+- `--list-tasks` shows patterns, and `--count` counts the tables they match
+  (it used to count a pattern as zero rows).
+- `DatabaseEngine.supports_table_patterns`: Redis turns it off, because its
+  "tables" are already key patterns and must reach the engine untouched.
+- Task hooks: `before_command` and `after_command` (a string or a list of
+  strings) run shell commands around any saved task (copy, backup, restore),
+  e.g. resetting the passwords of copied users or touching a marker file.
+  Before failing stops the task; a failed task skips after; after failing
+  fails the task. Commands run with `/bin/sh -c`, so `~/.zshrc` aliases are
+  not available. The task summary lists them, and **Manage saved tasks → Edit
+  before/after commands** sets them without editing the JSON.
+
+### Fixed
+- Source and target lists of different lengths were paired with `zip()`,
+  which silently dropped the extra tables and still reported success (a task
+  with 10 source tables and 9 target names never copied the 10th). The task
+  now refuses to start and names both lengths.
+- A pattern matching nothing, or a selection emptied by its exclusions, aborts
+  the task before the first copy. With `-y` this used to be indistinguishable
+  from success; it also catches a source whose table listing failed.
+- A table whose copy failed inside a multi-table task no longer hides behind
+  the total: it is listed as skipped and the task exits with failure.
+
 ## [2.5.1] - 2026-08-13
 
 ### Fixed

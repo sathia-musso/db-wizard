@@ -24,19 +24,38 @@ def run_task(task_config: dict[str, Any], assume_yes: bool = False, force_python
     incremental: run a copy task copying only the rows above the target's
                  watermark. Same rules: copy tasks only.
     since_column: watermark column override for incremental.
+
+    The task's before_command / after_command hooks wrap every task type
+    (see hooks.py for the rules): before runs first and can veto the task,
+    after runs only when the task succeeded.
     """
+    from .hooks import AFTER, BEFORE, run_hook
+
     task_type = task_config.get('type', 'copy')
 
     try:
+        if not run_hook(task_config, BEFORE):
+            console.print("[red]❌ Task not run: before_command failed[/red]")
+            return False
+
         if task_type == 'backup':
-            return run_backup_task(task_config)
+            ok = run_backup_task(task_config)
         elif task_type == 'restore':
-            return run_restore_task(task_config)
+            ok = run_restore_task(task_config)
         else:
-            return run_copy_task(
+            ok = run_copy_task(
                 task_config, assume_yes, force_python, schema_only,
                 incremental=incremental, since_column=since_column
             )
+
+        if not ok:
+            # Say it explicitly: a silently missing post-step (e.g. resetting
+            # the copied users' passwords) is easy to overlook.
+            if task_config.get(AFTER):
+                console.print("[yellow]⚠ after_command skipped: the task failed[/yellow]")
+            return False
+
+        return run_hook(task_config, AFTER)
     except Exception as e:
         console.print(f"[red]❌ Task error: {e}[/red]")
         return False
@@ -112,11 +131,43 @@ def run_copy_task(task_config: dict[str, Any], assume_yes: bool = False, force_p
         source_table = task_config.get('source_collection')
         target_table = task_config.get('target_collection', source_table)
 
-        if isinstance(source_table, list):
-            # Multiple tables -- iterate one by one
-            target_tables = target_table if isinstance(target_table, list) else source_table
+        from .table_selection import has_patterns, resolve_task_tables
+
+        # Engines whose table entries are not names (Redis key patterns) keep
+        # the old behaviour: entries are passed through untouched.
+        expand_patterns = source_engine.supports_table_patterns
+        uses_patterns = expand_patterns and has_patterns(source_table)
+
+        if isinstance(source_table, list) or uses_patterns:
+            # Multiple tables (or a pattern, which can match many).
+            # Resolve and pair everything BEFORE the first copy: a bad
+            # selection (pattern matching nothing, source/target lists of
+            # different lengths) must abort with the target untouched, not
+            # halfway through a drop-and-copy run.
+            try:
+                pairs = resolve_task_tables(
+                    source_table,
+                    target_table if isinstance(target_table, list) else None,
+                    lambda: [t['name'] for t in source_engine.list_tables(task_config['source_db'])],
+                    expand_patterns=expand_patterns,
+                )
+            except ValueError as e:
+                console.print(f"[red]❌ Invalid table selection: {e}[/red]")
+                return False
+
+            if uses_patterns:
+                # Show what the patterns expanded to, so an unattended run's
+                # log records exactly which tables were copied this time.
+                console.print(
+                    f"[cyan]🔎 Patterns resolved to {len(pairs)} "
+                    f"{target_engine.table_term_plural}: {', '.join(src for src, _ in pairs)}[/cyan]"
+                )
+
+            from .utils import copy_failed
+
             total_docs = 0
-            for src_t, tgt_t in zip(source_table, target_tables):
+            skipped = []
+            for src_t, tgt_t in pairs:
                 console.print(f"\n[bold]📁 Copying: {src_t}[/bold]")
                 result = target_engine.copy(
                     source_engine=source_engine,
@@ -132,7 +183,17 @@ def run_copy_task(task_config: dict[str, Any], assume_yes: bool = False, force_p
                     since_column=since_column,
                 )
                 total_docs += result.get('documents_copied', 0)
-            console.print(f"[green]✅ Copied {len(source_table)} {target_engine.table_term_plural}, {format_number(total_docs)} rows[/green]")
+                if copy_failed(result):
+                    skipped.append(src_t)
+            # Count the pairs actually processed, not the raw config list:
+            # with patterns the two differ.
+            copied = len(pairs) - len(skipped)
+            console.print(f"[green]✅ Copied {copied} {target_engine.table_term_plural}, {format_number(total_docs)} rows[/green]")
+            # Per-table refusals must not hide behind the total (same rule as
+            # the whole-database branch below).
+            if skipped:
+                console.print(f"[yellow]⚠ Skipped {len(skipped)}: {', '.join(skipped)}[/yellow]")
+                return False
         elif source_table:
             # Single table
             result = target_engine.copy(
@@ -322,3 +383,10 @@ def display_task_summary(task_config: dict[str, Any]) -> None:
         if task_config.get('incremental'):
             column = task_config.get('since_column') or 'auto-detected'
             console.print(f"[bold]Incremental:[/bold] Yes (watermark: {column})")
+
+    # Hooks apply to every task type: show them so the confirmation prompt
+    # reveals every shell command that is about to run.
+    from .hooks import describe_hooks
+
+    for label, command in describe_hooks(task_config):
+        console.print(f"[bold]{label}:[/bold] {command}")

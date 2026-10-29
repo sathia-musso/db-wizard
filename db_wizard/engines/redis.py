@@ -45,6 +45,9 @@ class RedisEngine(DatabaseEngine):
     Note: Redis uses logical databases (0-15) and doesn't have tables.
     We treat 'tables' as key patterns (e.g. '*') or omit them.
     """
+
+    # Table entries are passed to Redis as key patterns: never expand them.
+    supports_table_patterns = False
     def __init__(self, uri: str):
         super().__init__(uri)
         self.params = parse_redis_uri(uri)

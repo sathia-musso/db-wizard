@@ -74,6 +74,13 @@ class DatabaseEngine(ABC):
 
     supports_incremental: bool = False
 
+    # Whether a task's table list may contain glob patterns ("compliance_*")
+    # that are expanded against list_tables() at run time. True for engines
+    # with real, listable tables. Redis turns it off: its "tables" already
+    # ARE key patterns handed to SCAN, and expanding them against the single
+    # dummy '*' entry its list_tables() returns would break every task.
+    supports_table_patterns: bool = True
+
     def detect_watermark_column(self, database: str, table: str) -> str | None:
         """
         Return the name of a monotonically increasing column usable as a

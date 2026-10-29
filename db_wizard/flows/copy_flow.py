@@ -5,6 +5,7 @@ from rich.table import Table
 from rich.prompt import Prompt, Confirm
 from ..engine import EngineFactory
 from ..formatting import format_number
+from ..table_selection import has_patterns, resolve_tables
 from ..utils import resolve_host
 
 console = Console()
@@ -51,11 +52,22 @@ class CopyWizardFlow:
         else:
             target_db = Prompt.ask("Enter target database name", default=f"{source_db}_copy")
 
+        # The selection may contain patterns ("compliance_*"). Copy and count
+        # the tables they match now, but save the task with the patterns
+        # themselves (source_collection below) so every later run re-resolves
+        # them and picks up tables created in the meantime.
+        copy_tables = source_collection
+        if (isinstance(source_collection, list) and source_engine.supports_table_patterns
+                and has_patterns(source_collection)):
+            copy_tables = resolve_tables(
+                source_collection, [t['name'] for t in source_engine.list_tables(source_db)]
+            )
+
         target_collection = None
         if isinstance(source_collection, list):
             # Multi-collection: always use same names on target
             target_collection = source_collection
-            console.print(f"[dim]Target collections will use the same names as source ({len(source_collection)} collections)[/dim]")
+            console.print(f"[dim]Target collections will use the same names as source ({len(copy_tables)} collections)[/dim]")
         elif source_collection:
             if Confirm.ask(f"[yellow]Use same collection name '{source_collection}' on target?[/yellow]", default=True):
                 target_collection = source_collection
@@ -117,7 +129,9 @@ class CopyWizardFlow:
         )
         summary.add_row("Source DB", source_db)
         if isinstance(source_collection, list):
-            summary.add_row("Source Collections", f"{len(source_collection)} selected")
+            summary.add_row("Source Collections", f"{len(copy_tables)} selected")
+            if copy_tables != source_collection:
+                summary.add_row("Patterns", ", ".join(source_collection))
         else:
             summary.add_row("Source Collection", source_collection or "ALL")
         summary.add_row("", "")
@@ -149,12 +163,12 @@ class CopyWizardFlow:
         try:
             if isinstance(source_collection, list):
                 source_count = sum(
-                    source_engine.count_rows(source_db, c) for c in source_collection
+                    source_engine.count_rows(source_db, c) for c in copy_tables
                 )
                 target_tables = [t['name'] for t in target_engine.list_tables(target_db)]
                 target_count = sum(
                     target_engine.count_rows(target_db, c)
-                    for c in source_collection if c in target_tables
+                    for c in copy_tables if c in target_tables
                 )
             elif source_collection:
                 source_count = source_engine.count_rows(source_db, source_collection)
@@ -192,15 +206,15 @@ class CopyWizardFlow:
         try:
             if isinstance(source_collection, list):
                 # Multiple collections
-                console.print(f"[cyan]📋 Copying {len(source_collection)} {target_engine.table_term_plural}[/cyan]")
+                console.print(f"[cyan]📋 Copying {len(copy_tables)} {target_engine.table_term_plural}[/cyan]")
 
                 if create_backup and drop_target and hasattr(target_engine, 'backup_before_copy'):
-                    for coll in source_collection:
+                    for coll in copy_tables:
                         if coll in [t['name'] for t in target_engine.list_tables(target_db)]:
                             target_engine.backup_before_copy(target_db, coll)
 
                 results = {}
-                for coll_name in source_collection:
+                for coll_name in copy_tables:
                     console.print(f"\n[bold]📁 Copying: {coll_name}[/bold]")
                     result = target_engine.copy(
                         source_engine=source_engine,
